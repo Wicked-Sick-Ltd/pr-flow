@@ -25,19 +25,24 @@ RUN CONFIG from the user's arguments for this skill:
    while work is still in progress. Critical-tier repos, and changes that
    touch auth, payments, migrations, infra or secrets, may start as draft.
 4. Continue with **watch**. When the agent finishes, the PR must be ready for
-   review: omit `--draft` on create, or run `gh pr ready`. Never leave a
-   completed PR as draft.
+   review. **watch** runs `gh pr ready` if it is still a draft, then waits
+   again. Never leave a completed PR as draft, and never finish on the digest
+   from before `gh pr ready`.
 
 ## watch
 1. `pr-wait.sh <PR>` — wait for it (it polls; do not poll around it).
 2. Triage the digest: every failed check and every `[OPEN]` review thread gets a
    root-cause fix with a test, or a reasoned reply. Push, then re-run step 1.
-3. Stop when `checks_failed=0` and `unresolved_threads=0`. If the PR is still
-   a draft, run `gh pr ready`. Report the final digest in a short table. Do
-   **not** merge under this verb.
+3. Stop when the helper exits 0, `checks_failed=0`, `unresolved_threads=0`,
+   and `truncated=0`. If the PR is still a draft, run `gh pr ready`, then go
+   back to step 1. Marking a draft ready can start workflows and reviewer bots
+   that did not run while it was a draft; the digest from before `gh pr ready`
+   is not a result you can finish on. Report the fresh digest in a short
+   table. Do **not** merge under this verb.
 
 ## merge
-1. Run **watch** first (a green digest is the precondition).
+1. Run **watch** first. The precondition is watch's last digest, from after
+   any `gh pr ready`. Do not merge on a digest captured while the PR was draft.
 2. Refuse on a draft PR, on a Critical-tier repo without the user's explicit go,
    or with `--admin`. Confirm the base branch matches the repo's flow. A
    finished agent marks the PR ready for review before this step; draft is not
@@ -61,7 +66,8 @@ explicit go-ahead to merge.
 ## status
 `pr-wait.sh <PR> --no-wait`; answer: merged or not, checks state, unresolved
 threads (quote them), anything in the comments not yet actioned. If the work
-is finished and the PR is still draft, say so and run `gh pr ready`.
+is finished and the PR is still draft, run `gh pr ready` and then **watch**
+again. The digest from before it was marked ready is stale.
 
 ## sweep
 `gh pr list --state open --json number,title,headRefName,isDraft` for the repo

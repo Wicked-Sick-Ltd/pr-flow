@@ -12,10 +12,11 @@
 # Commit statuses (the older status API) are waited on and counted with the
 # check runs.
 #
-# Each poll is one GraphQL query for check runs, commit statuses, review
-# threads and mergeability, and it also carries the reviews and issue comments
-# the digest prints. That replaces the old per-poll REST calls. Before every
-# poll the script reads the GraphQL rateLimit (a one-point probe on the first
+# Each poll pages GraphQL connections (100 items per page) for check runs,
+# commit statuses, review threads, reviews and issue comments until each
+# connection is complete. A truncated page is not a digest: the script stops
+# with an error instead of reporting the first page as clean. Before every
+# query the script reads the GraphQL rateLimit (a one-point probe on the first
 # poll, then the rateLimit object on the previous response). When fewer than
 # 500 points remain it sleeps until resetAt and logs that, so the caller's
 # GitHub rate limit is not exhausted.
@@ -135,11 +136,11 @@ gh_try() {
   die "$label failed 3 times (gh ${cmd} ...): ${msg}"
 }
 
-# One combined poll. Reserved cost is nodes/100 (minimum 1): 100 contexts,
-# 100 reviews, 100 threads × 20 comments, 100 issue comments. Do not add
-# another nested connection without rechecking that cost.
+# One page of a poll. Each connection is at most 100 nodes; follow endCursor
+# until hasNextPage is false. Do not add another nested connection without
+# rechecking the point cost (nodes/100, minimum 1, plus thread comments).
 POLL_QUERY=$(cat <<'EOF'
-query($owner:String!, $name:String!, $number:Int!) {
+query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $reviewsAfter:String, $threadsAfter:String, $commentsAfter:String) {
   rateLimit { remaining resetAt cost }
   repository(owner:$owner, name:$name) {
     pullRequest(number:$number) {
@@ -156,8 +157,8 @@ query($owner:String!, $name:String!, $number:Int!) {
           commit {
             oid
             statusCheckRollup {
-              contexts(first:100) {
-                pageInfo { hasNextPage }
+              contexts(first:100, after:$contextsAfter) {
+                pageInfo { hasNextPage endCursor }
                 nodes {
                   __typename
                   ... on CheckRun {
@@ -178,12 +179,12 @@ query($owner:String!, $name:String!, $number:Int!) {
           }
         }
       }
-      reviews(first:100) {
-        pageInfo { hasNextPage }
+      reviews(first:100, after:$reviewsAfter) {
+        pageInfo { hasNextPage endCursor }
         nodes { submittedAt state body author { login } }
       }
-      reviewThreads(first:100) {
-        pageInfo { hasNextPage }
+      reviewThreads(first:100, after:$threadsAfter) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           isResolved
           isOutdated
@@ -194,8 +195,8 @@ query($owner:String!, $name:String!, $number:Int!) {
           }
         }
       }
-      comments(first:100) {
-        pageInfo { hasNextPage }
+      comments(first:100, after:$commentsAfter) {
+        pageInfo { hasNextPage endCursor }
         nodes { createdAt body author { login } }
       }
     }
@@ -222,9 +223,13 @@ def lc: ascii_downcase;
     remaining: $root.rateLimit.remaining,
     resetAt: $root.rateLimit.resetAt,
     checks_more: ($contexts.pageInfo.hasNextPage // false),
+    checks_cursor: ($contexts.pageInfo.endCursor // ""),
     threads_more: ($pr.reviewThreads.pageInfo.hasNextPage // false),
+    threads_cursor: ($pr.reviewThreads.pageInfo.endCursor // ""),
     reviews_more: ($pr.reviews.pageInfo.hasNextPage // false),
+    reviews_cursor: ($pr.reviews.pageInfo.endCursor // ""),
     comments_more: ($pr.comments.pageInfo.hasNextPage // false),
+    comments_cursor: ($pr.comments.pageInfo.endCursor // ""),
     checks: (
       ($contexts.nodes // [])
       | map(
@@ -357,10 +362,46 @@ guard_rate_limit() {
   fi
 }
 
-warn_truncated() {
-  if [ "$1" = true ]; then
-    echo "pr-wait: warning: $2" >&2
+# A page that still has more rows must carry an endCursor. Otherwise the
+# digest would be the first page only, which is not a readiness result.
+cursor_or_die() {
+  local more="$1" cursor="$2" label="$3"
+  if [ "$more" = true ] && { [ -z "$cursor" ] || [ "$cursor" = null ]; }; then
+    die "${label} page is truncated and has no endCursor; refusing a partial digest"
   fi
+  if [ -z "$cursor" ] || [ "$cursor" = null ]; then
+    printf '%s' ""
+  else
+    printf '%s' "$cursor"
+  fi
+}
+
+# Pass/fail uses the newest run of a check name when that newest run passed,
+# so a concurrency-cancelled predecessor does not keep checks_failed > 0.
+# Every other completed conclusion (failure, cancelled, timed_out,
+# action_required, startup_failure, stale, …) counts. success, neutral and
+# skipped do not.
+count_failed() {
+  jq '
+    def passing: IN("success", "neutral", "skipped");
+    group_by(.name)
+    | map(
+        sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
+        | if ($runs | length) < 2 then $runs
+          else
+            ($runs[-1]) as $latest
+            | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
+                [$latest]
+              else $runs end
+          end
+      )
+    | flatten
+    | map(select(
+        .status == "completed"
+        and (((.conclusion // "") | passing) | not)
+      ))
+    | length
+  '
 }
 
 # A URL carries its own owner, name and number, so it needs no extra request.
@@ -385,11 +426,14 @@ fi
 [ -n "$REPO" ] || die "not in a GitHub repo; pass --repo OWNER/NAME"
 
 if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
-  if [ -n "$PR" ]; then
-    meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)"
-  else
-    meta="$(gh_try "pr view" pr view --repo "$REPO" --json number)"
+  # `gh pr view --repo` with no selector is a usage error. Pass the branch.
+  if [ -z "$PR" ]; then
+    PR="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    if [ -z "$PR" ] || [ "$PR" = "HEAD" ]; then
+      die "no pull request given and the current branch could not be resolved; pass a PR number, URL, or branch"
+    fi
   fi
+  meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)"
   if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$meta"; then
     die "pr view failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$meta")"
   fi
@@ -422,30 +466,107 @@ last_sha=""
 stable_since=""
 sig_prev=""
 
-while :; do
-  guard_rate_limit
-  raw="$(gh_try "poll" api graphql -f query="$POLL_QUERY" -f owner="$owner" -f name="$repo_name" -F number="$number")"
-  if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
-    die "poll failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
-  fi
-  if ! jq -e '.data.repository.pullRequest != null' >/dev/null <<<"$raw"; then
-    die "poll returned no pull request ${number} in ${REPO}"
-  fi
-  parsed="$(jq -c "$PARSE_JQ" <<<"$raw")" || die "could not parse poll response"
-  note_rate_limit "$(jq -r '.remaining // empty' <<<"$parsed")" "$(jq -r '.resetAt // empty' <<<"$parsed")"
+# Page every connection to completion. Returns 10 if the head moves mid-page
+# so the caller can retry. Globals checks/reviews/threads/comments/sha/… are
+# updated only after the full snapshot is in hand.
+fetch_snapshot() {
+  local contexts_after="" reviews_after="" threads_after="" comments_after=""
+  local page=0 raw parsed
+  local acc_checks='[]' acc_reviews='[]' acc_threads='[]' acc_comments='[]'
+  local snap_url="" snap_base="" snap_state="" snap_sha="" snap_commit=""
+  local snap_mergeable="" snap_merge_state=""
+  local more_c more_r more_t more_m cur page_sha
+  local -a args
+  while :; do
+    page=$((page + 1))
+    if [ "$page" -gt 50 ]; then
+      die "poll still truncated after 50 pages; refusing a partial digest"
+    fi
+    guard_rate_limit
+    args=(api graphql -f query="$POLL_QUERY" -f owner="$owner" -f name="$repo_name" -F number="$number")
+    if [ -n "$contexts_after" ]; then args+=(-f contextsAfter="$contexts_after"); else args+=(-F contextsAfter=null); fi
+    if [ -n "$reviews_after" ]; then args+=(-f reviewsAfter="$reviews_after"); else args+=(-F reviewsAfter=null); fi
+    if [ -n "$threads_after" ]; then args+=(-f threadsAfter="$threads_after"); else args+=(-F threadsAfter=null); fi
+    if [ -n "$comments_after" ]; then args+=(-f commentsAfter="$comments_after"); else args+=(-F commentsAfter=null); fi
+    raw="$(gh_try "poll" "${args[@]}")"
+    if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
+      die "poll failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
+    fi
+    if ! jq -e '.data.repository.pullRequest != null' >/dev/null <<<"$raw"; then
+      die "poll returned no pull request ${number} in ${REPO}"
+    fi
+    parsed="$(jq -c "$PARSE_JQ" <<<"$raw")" || die "could not parse poll response"
+    note_rate_limit "$(jq -r '.remaining // empty' <<<"$parsed")" "$(jq -r '.resetAt // empty' <<<"$parsed")"
 
-  url="$(jq -r '.url // empty' <<<"$parsed")"
-  base="$(jq -r '.base // empty' <<<"$parsed")"
-  state="$(jq -r '.state // empty' <<<"$parsed")"
-  sha="$(jq -r '.sha // empty' <<<"$parsed")"
-  if [ -z "$url" ] || [ -z "$sha" ] || [ -z "$state" ]; then
-    die "poll response missing pull request fields"
+    page_sha="$(jq -r '.sha // empty' <<<"$parsed")"
+    if [ -z "$snap_sha" ]; then
+      snap_url="$(jq -r '.url // empty' <<<"$parsed")"
+      snap_base="$(jq -r '.base // empty' <<<"$parsed")"
+      snap_state="$(jq -r '.state // empty' <<<"$parsed")"
+      snap_sha="$page_sha"
+      snap_commit="$(jq -r '.commit // empty' <<<"$parsed")"
+      snap_mergeable="$(jq -r '.mergeable' <<<"$parsed")"
+      snap_merge_state="$(jq -r '.merge_state' <<<"$parsed")"
+      if [ -z "$snap_url" ] || [ -z "$snap_sha" ] || [ -z "$snap_state" ]; then
+        die "poll response missing pull request fields"
+      fi
+    elif [ "$page_sha" != "$snap_sha" ]; then
+      echo "pr-wait: head changed while paging (${snap_sha} -> ${page_sha}); retrying the poll" >&2
+      return 10
+    fi
+
+    acc_checks="$(jq -cn --argjson a "$acc_checks" --argjson b "$(jq -c '.checks' <<<"$parsed")" '$a + $b')"
+    acc_reviews="$(jq -cn --argjson a "$acc_reviews" --argjson b "$(jq -c '.reviews' <<<"$parsed")" '$a + $b')"
+    acc_threads="$(jq -cn --argjson a "$acc_threads" --argjson b "$(jq -c '.threads' <<<"$parsed")" '$a + $b')"
+    acc_comments="$(jq -cn --argjson a "$acc_comments" --argjson b "$(jq -c '.comments' <<<"$parsed")" '$a + $b')"
+
+    more_c="$(jq -r '.checks_more' <<<"$parsed")"
+    more_r="$(jq -r '.reviews_more' <<<"$parsed")"
+    more_t="$(jq -r '.threads_more' <<<"$parsed")"
+    more_m="$(jq -r '.comments_more' <<<"$parsed")"
+    # Hold the last cursor after a connection is exhausted so the next page of
+    # a sibling connection does not request page 1 again and duplicate rows.
+    cur="$(cursor_or_die "$more_c" "$(jq -r '.checks_cursor // empty' <<<"$parsed")" checks)"
+    [ -n "$cur" ] && contexts_after="$cur"
+    cur="$(cursor_or_die "$more_r" "$(jq -r '.reviews_cursor // empty' <<<"$parsed")" reviews)"
+    [ -n "$cur" ] && reviews_after="$cur"
+    cur="$(cursor_or_die "$more_t" "$(jq -r '.threads_cursor // empty' <<<"$parsed")" "review threads")"
+    [ -n "$cur" ] && threads_after="$cur"
+    cur="$(cursor_or_die "$more_m" "$(jq -r '.comments_cursor // empty' <<<"$parsed")" comments)"
+    [ -n "$cur" ] && comments_after="$cur"
+    if [ "$more_c" != true ] && [ "$more_r" != true ] && [ "$more_t" != true ] && [ "$more_m" != true ]; then
+      break
+    fi
+  done
+
+  checks="$acc_checks"
+  reviews="$acc_reviews"
+  threads="$acc_threads"
+  comments="$acc_comments"
+  url="$snap_url"
+  base="$snap_base"
+  state="$snap_state"
+  sha="$snap_sha"
+  commit_oid="$snap_commit"
+  mergeable="$snap_mergeable"
+  merge_state="$snap_merge_state"
+  return 0
+}
+
+while :; do
+  fetch_snapshot
+  fetch_rc=$?
+  if [ "$fetch_rc" -eq 10 ]; then
+    continue
   fi
+  if [ "$fetch_rc" -ne 0 ]; then
+    exit "$fetch_rc"
+  fi
+
   if [ "$banner_done" -eq 0 ]; then
     echo "pr-wait: $url  ($state, base $base)"
     banner_done=1
   fi
-  commit_oid="$(jq -r '.commit // empty' <<<"$parsed")"
   if [ -n "$commit_oid" ] && [ "$commit_oid" != "$sha" ]; then
     echo "pr-wait: warning: head ${sha} differs from the commit that carries checks (${commit_oid})" >&2
   fi
@@ -454,17 +575,6 @@ while :; do
     [ -n "$last_sha" ] && echo "pr-wait: new head $sha — restarting the wait"
     last_sha="$sha"; start=$(now); stable_since=""; sig_prev=""
   fi
-
-  checks="$(jq -c '.checks' <<<"$parsed")"
-  reviews="$(jq -c '.reviews' <<<"$parsed")"
-  threads="$(jq -c '.threads' <<<"$parsed")"
-  comments="$(jq -c '.comments' <<<"$parsed")"
-  mergeable="$(jq -r '.mergeable' <<<"$parsed")"
-  merge_state="$(jq -r '.merge_state' <<<"$parsed")"
-  warn_truncated "$(jq -r '.checks_more' <<<"$parsed")" "more than 100 check contexts on ${sha}; the digest lists the first 100"
-  warn_truncated "$(jq -r '.threads_more' <<<"$parsed")" "more than 100 review threads; the digest lists the first 100"
-  warn_truncated "$(jq -r '.reviews_more' <<<"$parsed")" "more than 100 reviews; the digest lists the first 100"
-  warn_truncated "$(jq -r '.comments_more' <<<"$parsed")" "more than 100 issue comments; the digest lists the first 100"
 
   total="$(jq 'length' <<<"$checks")"
   pending="$(jq '[.[] | select(.status != "completed")] | length' <<<"$checks")"
@@ -483,6 +593,12 @@ while :; do
     echo "pr-wait: no check runs registered after ${GRACE}s — nothing to wait for (verify the repo has CI/bots before treating this as green)"; break
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
+    # Settle has not elapsed, but nothing is still running. Emitting the digest
+    # is the truthful result; exit 2 would claim those checks are in progress.
+    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+      echo "pr-wait: timed out during settle after ${TIMEOUT}s with all $total check(s) complete; emitting the digest"
+      break
+    fi
     echo "pr-wait: timed out after ${TIMEOUT}s with $pending/$total check(s) still running"; exit 2
   fi
   sig_prev="$sig"
@@ -499,7 +615,7 @@ echo
 echo "== CHECKS ($sha)"
 jq -r '.[] | "\(.conclusion // .status)\t\(.name)\t\(.output.title // "")"' <<<"$checks" | sort | column -t -s $'\t' 2>/dev/null \
   || jq -r '.[] | "\(.conclusion // .status)\t\(.name)"' <<<"$checks"
-failed="$(jq '[.[] | select(.status == "completed" and (.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure")))] | length' <<<"$checks")"
+failed="$(count_failed <<<"$checks")"
 
 echo
 echo "== REVIEWS"
@@ -521,7 +637,7 @@ jq -r '.[] | "--- \(.created_at) \(.user.login)\n  \(.body | gsub("\r";"") | .[0
 [ "$(jq 'length' <<<"$comments")" -gt 0 ] || echo "(none)"
 
 echo
-echo "SUMMARY pr=$number checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state"
+echo "SUMMARY pr=$number checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state truncated=0"
 if [ "$failed" -eq 0 ]; then
   exit 0
 fi

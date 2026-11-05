@@ -2,6 +2,11 @@
 
 ## 1.1.0 (2026-11-05)
 
+### Fixed
+
+- `pr-wait.sh` pages check, review, thread and comment connections and refuses a partial digest. Pass/fail ignores a concurrency-cancelled run when a later run of that check passed, and treats stale (and any other completed conclusion besides success, neutral and skipped) as a failure. A timeout during the settle window still prints the digest when every listed check is already complete. With no PR argument it passes the current branch to `gh pr view`.
+- `pr`: after `gh pr ready`, wait again. The digest from before the PR was marked ready is not a clean result.
+
 ### Changed
 
 - This repository is the canonical MIT home of PR Flow. Marketplace copies and `ai-*-repo` checkouts should vendor or sync from here.

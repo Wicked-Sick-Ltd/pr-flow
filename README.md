@@ -55,8 +55,10 @@ installing.
   optional PR number or URL and `--repo owner/name`.
 - [pr-wait.sh](skills/landing-prs/pr-wait.sh): wait for check runs and commit
   statuses, then print checks, reviews, unresolved threads and comments.
-  One GraphQL query per poll, default every 90 seconds (minimum 60). Sleeps
-  until the rate-limit reset when fewer than 500 points remain.
+  Each poll pages GraphQL connections (100 per page) until checks, reviews,
+  threads and comments are complete. Default interval 90 seconds (minimum 60).
+  Sleeps until the rate-limit reset when fewer than 500 points remain. A
+  truncated page is an error, not a clean digest.
 
 `watch` stops after triage. `land` merges when that is authorized. Keep the
 repository's branch rules. A zero exit from the helper means checks passed;

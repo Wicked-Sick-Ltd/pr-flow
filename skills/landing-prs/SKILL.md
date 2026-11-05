@@ -27,18 +27,24 @@ standards, follow those gates as well.
    progress; as soon as the agent stops, run `gh pr ready` (or create without
    `--draft`). Critical-tier / auth / payments / migrations / infra / secrets
    work may start as draft during WIP, but must flip to ready for review the
-   moment the agent finishes so reviewers get rolling.
+   moment the agent finishes so reviewers get rolling. After `gh pr ready`,
+   go back to step 3. Workflows and reviewer bots that skipped the draft may
+   still be starting, and the digest from before the PR was marked ready does
+   not count.
 3. **Wait.** Run `pr-wait.sh <pr>` from this skill's directory (see
    `--help`). It returns only when every check run on the head commit is
    terminal, and when reviewer bots register a check run, that is the moment
    reviews have landed too. "Checks green" before the bots finish is not
    green. Commit statuses are waited on with the check runs and count toward
    the same totals. The default poll is 90s (`--interval` or
-   `PR_WAIT_INTERVAL`, minimum 60s). Each poll is one GraphQL query for check
-   runs, commit statuses, review threads and mergeability (and the reviews and
-   issue comments the digest prints). Before each poll, if fewer than 500
-   GraphQL points remain, the script sleeps until the rate-limit reset and logs
-   that. Do not poll around it, and do not pass an interval under 60s.
+   `PR_WAIT_INTERVAL`, minimum 60s). Each poll pages GraphQL connections (100
+   per page) for check runs, commit statuses, review threads, reviews and
+   issue comments until each connection is complete. A truncated page is an
+   error, not a clean digest. Before each query, if fewer than 500 GraphQL
+   points remain, the script sleeps until the rate-limit reset and logs that.
+   Do not poll around it, and do not pass an interval under 60s. The SUMMARY
+   includes `truncated=0` only when paging finished. Exit 0 is required as
+   well as `checks_failed=0` and `unresolved_threads=0`.
 4. **Triage.** For each failed check and each OPEN review thread in the
    digest: reproduce, fix at the root with a test (add a focused regression test), push, and go back to step 3. A
    finding you disagree with gets a reply explaining why, never silence.
