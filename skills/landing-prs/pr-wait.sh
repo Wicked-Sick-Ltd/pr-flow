@@ -483,6 +483,9 @@ while :; do
     echo "pr-wait: no check runs registered after ${GRACE}s — nothing to wait for (verify the repo has CI/bots before treating this as green)"; break
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
+    # All listed runs are done but the settle window has not elapsed — still
+    # emit the digest rather than claiming checks are running.
+    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then break; fi
     echo "pr-wait: timed out after ${TIMEOUT}s with $pending/$total check(s) still running"; exit 2
   fi
   sig_prev="$sig"
@@ -499,7 +502,10 @@ echo
 echo "== CHECKS ($sha)"
 jq -r '.[] | "\(.conclusion // .status)\t\(.name)\t\(.output.title // "")"' <<<"$checks" | sort | column -t -s $'\t' 2>/dev/null \
   || jq -r '.[] | "\(.conclusion // .status)\t\(.name)"' <<<"$checks"
-failed="$(jq '[.[] | select(.status == "completed" and (.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure")))] | length' <<<"$checks")"
+# One entry per check name: statusCheckRollup keeps concurrency-cancelled
+# runs beside later successes for the same job; only the latest (highest id)
+# conclusion decides pass/fail.
+failed="$(jq 'group_by(.name) | map(sort_by(.id) | last) | [.[] | select(.status == "completed" and (.conclusion | IN("failure","cancelled","timed_out","action_required","startup_failure")))] | length' <<<"$checks")"
 
 echo
 echo "== REVIEWS"
