@@ -724,8 +724,13 @@ while :; do
     echo "pr-wait: $url  ($state, base $base)"
     banner_done=1
   fi
+  # Checks are read from commits(last:1), which can lag headRefOid after a
+  # push. Advertising the newer SHA as head= would let --match-head-commit
+  # merge a commit whose checks were never read.
+  head_mismatch=0
   if [ -n "$commit_oid" ] && [ "$commit_oid" != "$sha" ]; then
-    echo "pr-wait: warning: head ${sha} differs from the commit that carries checks (${commit_oid})" >&2
+    head_mismatch=1
+    echo "pr-wait: head ${sha} differs from the commit that carries checks (${commit_oid}); refusing a clean result for ${sha}" >&2
   fi
 
   if [ "$sha" != "$last_sha" ]; then
@@ -739,21 +744,25 @@ while :; do
   t=$(now)
   elapsed=$((t - start))
   if [ "$NOWAIT" -eq 1 ]; then break; fi
-  if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+  if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ] && [ "$head_mismatch" -eq 0 ]; then
     # every listed run is done — but only trust the list once it has stopped changing
     if [ "$sig" != "$sig_prev" ] || [ -z "$stable_since" ]; then stable_since=$t; fi
     if [ $((t - stable_since)) -ge "$SETTLE" ]; then break; fi
   else
     stable_since=""
   fi
-  if [ "$total" -eq 0 ] && [ "$elapsed" -ge "$GRACE" ]; then
+  if [ "$total" -eq 0 ] && [ "$elapsed" -ge "$GRACE" ] && [ "$head_mismatch" -eq 0 ]; then
     echo "pr-wait: no check runs registered after ${GRACE}s — nothing to wait for (verify the repo has CI/bots before treating this as green)"; break
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
     # Settle has not elapsed, but nothing is still running. Emitting the digest
     # is the truthful result; exit 2 would claim those checks are in progress.
-    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+    if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ] && [ "$head_mismatch" -eq 0 ]; then
       echo "pr-wait: timed out during settle after ${TIMEOUT}s with all $total check(s) complete; emitting the digest"
+      break
+    fi
+    if [ "$head_mismatch" -eq 1 ]; then
+      echo "pr-wait: timed out after ${TIMEOUT}s and head ${sha} still differs from checked commit ${commit_oid}" >&2
       break
     fi
     echo "pr-wait: timed out after ${TIMEOUT}s with $pending/$total check(s) still running"; exit 2
@@ -768,8 +777,15 @@ while :; do
   sleep "$INTERVAL"
 done
 
+# head= is the commit the checks were read from. When that is not the PR
+# head, the snapshot is not a merge precondition.
+checked="$sha"
+if [ -n "$commit_oid" ]; then
+  checked="$commit_oid"
+fi
+
 echo
-echo "== CHECKS ($sha)"
+echo "== CHECKS ($checked)"
 jq -r '.[] | "\(.conclusion // .status)\t\(.name)\t\(.output.title // "")"' <<<"$checks" | sort | column -t -s $'\t' 2>/dev/null \
   || jq -r '.[] | "\(.conclusion // .status)\t\(.name)"' <<<"$checks"
 failed="$(count_failed <<<"$checks")"
@@ -794,9 +810,14 @@ jq -r '.[] | "--- \(.created_at) \(.user.login)\n  \(.body | gsub("\r";"") | .[0
 [ "$(jq 'length' <<<"$comments")" -gt 0 ] || echo "(none)"
 
 echo
-echo "SUMMARY pr=$number head=$sha checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state truncated=0"
+echo "SUMMARY pr=$number head=$checked checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state truncated=0"
 # Exit 0 is only a finished green head. A --no-wait snapshot can still have
 # queued or in-progress checks; those are exit 2 with the digest printed.
+# A digest whose checks belong to an older commit than the PR head is also
+# exit 2, and head= names that older commit so merge cannot pin the new one.
+if [ "$head_mismatch" -eq 1 ]; then
+  exit 2
+fi
 if [ "$failed" -gt 0 ]; then
   exit 1
 fi

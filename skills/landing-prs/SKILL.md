@@ -45,10 +45,15 @@ standards, follow those gates as well.
    GraphQL points remain, the script sleeps until the rate-limit reset and
    logs that. Do not poll around it, and do not pass an interval under 60s.
    The SUMMARY includes `truncated=0` only when paging finished, and `head=`
-   is the commit that digest describes. Exit 0 means every listed check is
-   terminal and passed. Also require `checks_pending=0`, `checks_failed=0`
+   is the commit whose checks that digest describes. Exit 0 means every
+   listed check on that commit is terminal and passed, and that commit is
+   the pull request head. Also require `checks_pending=0`, `checks_failed=0`
    and `unresolved_threads=0`. A `--no-wait` snapshot that still has queued
    or in-progress checks prints the digest and exits 2; that is not clean.
+   If the pull request head has moved past the commit that carries the
+   checks, the helper keeps waiting. A snapshot of that mismatch exits 2
+   and `head=` stays the checked commit, so `--match-head-commit` cannot
+   accept the unchecked head.
 4. **Triage.** For each failed check and each OPEN review thread in the
    digest: reproduce, fix at the root with a test (add a focused regression test), push, and go back to step 3. A
    finding you disagree with gets a reply explaining why, never silence.

@@ -122,6 +122,7 @@ case "$mode:$page" in
   same-id:1) cat "$MOCK_FIXTURE/same-id.json" ;;
   paths:1) cat "$MOCK_FIXTURE/paths.json" ;;
   apps:1) cat "$MOCK_FIXTURE/apps.json" ;;
+  mismatch:1) cat "$MOCK_FIXTURE/mismatch.json" ;;
   thread-comments:1) cat "$MOCK_FIXTURE/thread-comments.json" ;;
   thread-cursor:1) cat "$MOCK_FIXTURE/thread-cursor.json" ;;
   large-reviews:1) cat "$MOCK_FIXTURE/large-reviews.json" ;;
@@ -350,6 +351,29 @@ assert_summary "app identity stays separate" "$log.out" $? 1 "checks_total=2 che
 log="$TMP/nowait-pending"
 MOCK_MODE=pending run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "no-wait pending is not success" "$log.out" $? 2 "checks_total=1 checks_pending=1 checks_failed=0"
+
+# 14g. a newer PR head than the checked commit is not a clean digest
+jq '.data.repository.pullRequest.headRefOid = "newsha"' "$FIX/passing.json" >"$FIX/mismatch.json"
+log="$TMP/mismatch"
+MOCK_MODE=mismatch run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 2 ] && grep -q "SUMMARY pr=4 head=abc123 " "$log.out" && ! grep -q "head=newsha" "$log.out" && grep -q "refusing a clean result" "$log.err"; then
+  ok "mismatched head is not a clean digest"
+else
+  fail "mismatched head exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 14h. timeout does not turn that mismatch into a settle success
+log="$TMP/mismatch-timeout"
+MOCK_MODE=mismatch run_wait "$log" 4 --repo acme/widgets --timeout 0 --settle 0 --interval 60 --grace 10000
+code=$?
+if [ "$code" -eq 2 ] && grep -q "SUMMARY pr=4 head=abc123 " "$log.out" && ! grep -q "head=newsha" "$log.out"; then
+  ok "timeout keeps a mismatched head unclean"
+else
+  fail "timeout mismatch exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
 
 # 15. a second page of replies on one thread is part of the digest
 thread_more="$(jq -cn '{id:"T1", isResolved:false, isOutdated:false, path:"skills/landing-prs/pr-wait.sh", line:1,
