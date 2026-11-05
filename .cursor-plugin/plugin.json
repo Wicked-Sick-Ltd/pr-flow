@@ -1,0 +1,22 @@
+{
+  "name": "pr-flow",
+  "displayName": "PR Flow",
+  "version": "1.1.0",
+  "description": "Skills and a Bash/gh/jq helper for creating pull requests, waiting for checks, addressing reviews and landing changes.",
+  "author": {
+    "name": "Wicked Sick Ltd",
+    "email": "hello@wickedsick.com"
+  },
+  "repository": "https://github.com/Wicked-Sick-Ltd/pr-flow",
+  "homepage": "https://github.com/Wicked-Sick-Ltd/pr-flow",
+  "license": "MIT",
+  "keywords": [
+    "pull-request",
+    "ci",
+    "code-review",
+    "landing-prs",
+    "pr-flow"
+  ],
+  "category": "developer-tools",
+  "skills": "./skills/"
+}
