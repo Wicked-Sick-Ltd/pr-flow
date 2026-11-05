@@ -66,7 +66,14 @@ usage() {
   ' "$0"
 }
 
-die() { echo "pr-wait: $*" >&2; exit 3; }
+PR_WAIT_WORK=""
+die() {
+  echo "pr-wait: $*" >&2
+  if [ -n "${PR_WAIT_WORK:-}" ]; then
+    rm -rf "$PR_WAIT_WORK"
+  fi
+  exit 3
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -137,8 +144,9 @@ gh_try() {
 }
 
 # One page of a poll. Each connection is at most 100 nodes; follow endCursor
-# until hasNextPage is false. Do not add another nested connection without
-# rechecking the point cost (nodes/100, minimum 1, plus thread comments).
+# until hasNextPage is false. Replies on a review thread are paged the same
+# way. Do not add another nested connection without rechecking the point cost
+# (nodes/100, minimum 1, plus thread comments).
 POLL_QUERY=$(cat <<'EOF'
 query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $reviewsAfter:String, $threadsAfter:String, $commentsAfter:String) {
   rateLimit { remaining resetAt cost }
@@ -167,6 +175,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
+                    checkSuite { app { name } workflowRun { workflow { name } } }
                   }
                   ... on StatusContext {
                     context
@@ -186,11 +195,13 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
       reviewThreads(first:100, after:$threadsAfter) {
         pageInfo { hasNextPage endCursor }
         nodes {
+          id
           isResolved
           isOutdated
           path
           line
-          comments(first:20) {
+          comments(first:100) {
+            pageInfo { hasNextPage endCursor }
             nodes { author { login } body }
           }
         }
@@ -235,13 +246,17 @@ def lc: ascii_downcase;
       | map(
           if .__typename == "CheckRun" then {
             id: (.databaseId // .name),
+            kind: "check",
             name: (.name // "check"),
+            workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
             status: ((.status // "PENDING") | lc),
             conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
             output: {title: (.title // "")}
           }
           elif .__typename == "StatusContext" then {
             id: ("status:" + (.context // "status")),
+            kind: "status",
+            workflow: "",
             name: (.context // "status"),
             status: (if (.state == "PENDING" or .state == "EXPECTED") then "pending" else "completed" end),
             conclusion: (
@@ -265,11 +280,20 @@ def lc: ascii_downcase;
     ],
     threads: [
       $pr.reviewThreads.nodes[]?
-      | .comments = {
-          nodes: [
-            .comments.nodes[]?
-            | {body: (.body // ""), author: {login: (.author.login // "unknown")}}
-          ]
+      | {
+          id: (.id // ""),
+          isResolved: .isResolved,
+          isOutdated: .isOutdated,
+          path: .path,
+          line: .line,
+          comments_more: (.comments.pageInfo.hasNextPage // false),
+          comments_cursor: (.comments.pageInfo.endCursor // ""),
+          comments: {
+            nodes: [
+              .comments.nodes[]?
+              | {body: (.body // ""), author: {login: (.author.login // "unknown")}}
+            ]
+          }
         }
     ],
     comments: [
@@ -376,32 +400,123 @@ cursor_or_die() {
   fi
 }
 
-# Pass/fail uses the newest run of a check name when that newest run passed,
-# so a concurrency-cancelled predecessor does not keep checks_failed > 0.
-# Every other completed conclusion (failure, cancelled, timed_out,
-# action_required, startup_failure, stale, …) counts. success, neutral and
-# skipped do not.
+# Check runs are deduped only within the same name and workflow (or app, when
+# there is no workflow). A later success drops an older cancelled run of that
+# same check. Commit statuses are never folded into a check run, even when the
+# context string matches the check name. A completed conclusion other than
+# success, neutral or skipped is a failure (including stale).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
-    group_by(.name)
-    | map(
-        sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
-        | if ($runs | length) < 2 then $runs
-          else
-            ($runs[-1]) as $latest
-            | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
-                [$latest]
-              else $runs end
-          end
-      )
-    | flatten
+    def newest_passing_only:
+      group_by([.name, (.workflow // "")])
+      | map(
+          sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
+          | if ($runs | length) < 2 then $runs
+            else
+              ($runs[-1]) as $latest
+              | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
+                  [$latest]
+                else $runs end
+            end
+        )
+      | flatten;
+    (map(select(.kind == "status")) + (map(select(.kind != "status")) | newest_passing_only))
     | map(select(
         .status == "completed"
         and (((.conclusion // "") | passing) | not)
       ))
     | length
   '
+}
+
+# Concatenate two JSON arrays via files. A single --argjson value over 128KiB
+# is rejected by the kernel, which would otherwise drop a page and still look
+# like a successful digest.
+append_json_file() {
+  local dest="$1" piece="$2" next part
+  next="$(mktemp)" || die "mktemp failed"
+  part="$(mktemp)" || die "mktemp failed"
+  printf '%s' "$piece" >"$part"
+  if ! jq -s '.[0] + .[1]' "$dest" "$part" >"$next"; then
+    rm -f "$next" "$part"
+    die "could not accumulate poll page"
+  fi
+  mv "$next" "$dest"
+  rm -f "$part"
+}
+
+THREAD_COMMENT_QUERY=$(cat <<'EOF'
+query($id:ID!, $after:String) {
+  rateLimit { remaining resetAt cost }
+  node(id:$id) {
+    ... on PullRequestReviewThread {
+      comments(first:100, after:$after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { author { login } body }
+      }
+    }
+  }
+}
+EOF
+)
+
+# Follow comment cursors on any thread whose first page was incomplete.
+page_thread_comments() {
+  local file="$1" id cursor raw more new_cursor nodes next part n more_json
+  if jq -e 'any(.[]; .comments_more == true and ((.id // "") == ""))' "$file" >/dev/null; then
+    die "review thread comments are truncated and the thread has no id; refusing a partial digest"
+  fi
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    n=0
+    while :; do
+      more="$(jq -r --arg id "$id" '.[] | select(.id == $id) | .comments_more' "$file")"
+      [ "$more" = true ] || break
+      n=$((n + 1))
+      if [ "$n" -gt 50 ]; then
+        die "review thread ${id} still truncated after 50 comment pages; refusing a partial digest"
+      fi
+      cursor="$(jq -r --arg id "$id" '.[] | select(.id == $id) | .comments_cursor // empty' "$file")"
+      if [ -z "$cursor" ] || [ "$cursor" = null ]; then
+        die "review thread comments are truncated and have no endCursor; refusing a partial digest"
+      fi
+      guard_rate_limit
+      raw="$(gh_try "thread comments" api graphql -f query="$THREAD_COMMENT_QUERY" -f id="$id" -f after="$cursor")"
+      if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
+        die "thread comments failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
+      fi
+      if ! jq -e '.data.node.comments != null' >/dev/null <<<"$raw"; then
+        die "thread comments returned no thread ${id}"
+      fi
+      note_rate_limit \
+        "$(jq -r '.data.rateLimit.remaining // empty' <<<"$raw")" \
+        "$(jq -r '.data.rateLimit.resetAt // empty' <<<"$raw")"
+      nodes="$(jq -c '[.data.node.comments.nodes[]? | {body:(.body // ""), author:{login:(.author.login // "unknown")}}]' <<<"$raw")" \
+        || die "could not read thread comments"
+      more="$(jq -r '.data.node.comments.pageInfo.hasNextPage' <<<"$raw")"
+      new_cursor="$(jq -r '.data.node.comments.pageInfo.endCursor // empty' <<<"$raw")"
+      if [ "$more" = true ] && { [ -z "$new_cursor" ] || [ "$new_cursor" = null ]; }; then
+        die "review thread comments are truncated and have no endCursor; refusing a partial digest"
+      fi
+      if [ "$more" = true ]; then more_json=true; else more_json=false; fi
+      next="$(mktemp)" || die "mktemp failed"
+      part="$(mktemp)" || die "mktemp failed"
+      printf '%s' "$nodes" >"$part"
+      if ! jq --arg id "$id" --arg cursor "$new_cursor" --argjson more "$more_json" --slurpfile extra "$part" '
+        map(if .id == $id then
+          .comments.nodes += $extra[0]
+          | .comments_more = $more
+          | .comments_cursor = $cursor
+        else . end)
+      ' "$file" >"$next"; then
+        rm -f "$next" "$part"
+        die "could not accumulate thread comments"
+      fi
+      mv "$next" "$file"
+      rm -f "$part"
+    done
+  done < <(jq -r '.[] | select(.comments_more == true) | .id' "$file")
 }
 
 # A URL carries its own owner, name and number, so it needs no extra request.
@@ -471,12 +586,22 @@ sig_prev=""
 # updated only after the full snapshot is in hand.
 fetch_snapshot() {
   local contexts_after="" reviews_after="" threads_after="" comments_after=""
-  local page=0 raw parsed
-  local acc_checks='[]' acc_reviews='[]' acc_threads='[]' acc_comments='[]'
+  local page=0 raw parsed piece
+  local work checks_file reviews_file threads_file comments_file
   local snap_url="" snap_base="" snap_state="" snap_sha="" snap_commit=""
   local snap_mergeable="" snap_merge_state=""
   local more_c more_r more_t more_m cur page_sha
   local -a args
+  work="$(mktemp -d)" || die "mktemp failed"
+  PR_WAIT_WORK="$work"
+  checks_file="$work/checks"
+  reviews_file="$work/reviews"
+  threads_file="$work/threads"
+  comments_file="$work/comments"
+  printf '%s' '[]' >"$checks_file"
+  printf '%s' '[]' >"$reviews_file"
+  printf '%s' '[]' >"$threads_file"
+  printf '%s' '[]' >"$comments_file"
   while :; do
     page=$((page + 1))
     if [ "$page" -gt 50 ]; then
@@ -512,13 +637,19 @@ fetch_snapshot() {
       fi
     elif [ "$page_sha" != "$snap_sha" ]; then
       echo "pr-wait: head changed while paging (${snap_sha} -> ${page_sha}); retrying the poll" >&2
+      rm -rf "$work"
+      PR_WAIT_WORK=""
       return 10
     fi
 
-    acc_checks="$(jq -cn --argjson a "$acc_checks" --argjson b "$(jq -c '.checks' <<<"$parsed")" '$a + $b')"
-    acc_reviews="$(jq -cn --argjson a "$acc_reviews" --argjson b "$(jq -c '.reviews' <<<"$parsed")" '$a + $b')"
-    acc_threads="$(jq -cn --argjson a "$acc_threads" --argjson b "$(jq -c '.threads' <<<"$parsed")" '$a + $b')"
-    acc_comments="$(jq -cn --argjson a "$acc_comments" --argjson b "$(jq -c '.comments' <<<"$parsed")" '$a + $b')"
+    piece="$(jq -c '.checks' <<<"$parsed")" || die "could not read checks from poll page"
+    append_json_file "$checks_file" "$piece"
+    piece="$(jq -c '.reviews' <<<"$parsed")" || die "could not read reviews from poll page"
+    append_json_file "$reviews_file" "$piece"
+    piece="$(jq -c '.threads' <<<"$parsed")" || die "could not read review threads from poll page"
+    append_json_file "$threads_file" "$piece"
+    piece="$(jq -c '.comments' <<<"$parsed")" || die "could not read comments from poll page"
+    append_json_file "$comments_file" "$piece"
 
     more_c="$(jq -r '.checks_more' <<<"$parsed")"
     more_r="$(jq -r '.reviews_more' <<<"$parsed")"
@@ -539,10 +670,13 @@ fetch_snapshot() {
     fi
   done
 
-  checks="$acc_checks"
-  reviews="$acc_reviews"
-  threads="$acc_threads"
-  comments="$acc_comments"
+  page_thread_comments "$threads_file"
+  checks="$(cat "$checks_file")" || die "could not read accumulated checks"
+  reviews="$(cat "$reviews_file")" || die "could not read accumulated reviews"
+  threads="$(cat "$threads_file")" || die "could not read accumulated review threads"
+  comments="$(cat "$comments_file")" || die "could not read accumulated comments"
+  rm -rf "$work"
+  PR_WAIT_WORK=""
   url="$snap_url"
   base="$snap_base"
   state="$snap_state"

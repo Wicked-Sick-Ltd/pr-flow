@@ -38,8 +38,9 @@ standards, follow those gates as well.
    green. Commit statuses are waited on with the check runs and count toward
    the same totals. The default poll is 90s (`--interval` or
    `PR_WAIT_INTERVAL`, minimum 60s). Each poll pages GraphQL connections (100
-   per page) for check runs, commit statuses, review threads, reviews and
-   issue comments until each connection is complete. A truncated page is an
+   per page) for check runs, commit statuses, review threads (including every
+   reply on a thread), reviews and issue comments until each connection is
+   complete. A truncated page is an
    error, not a clean digest. Before each query, if fewer than 500 GraphQL
    points remain, the script sleeps until the rate-limit reset and logs that.
    Do not poll around it, and do not pass an interval under 60s. The SUMMARY

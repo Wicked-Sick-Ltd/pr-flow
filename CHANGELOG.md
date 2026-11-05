@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `pr-wait.sh` pages check, review, thread and comment connections and refuses a partial digest. Pass/fail ignores a concurrency-cancelled run when a later run of that check passed, and treats stale (and any other completed conclusion besides success, neutral and skipped) as a failure. A timeout during the settle window still prints the digest when every listed check is already complete. With no PR argument it passes the current branch to `gh pr view`.
+- `pr-wait.sh` pages check, review, thread, thread-reply and comment connections and refuses a partial digest. Pages are joined from files so a large page cannot be dropped by the argument-size limit. Pass/fail ignores a concurrency-cancelled run only when a later run of that same check and workflow passed. A commit status is counted on its own, even when its name matches a check run. Stale and any other completed conclusion besides success, neutral and skipped are failures. A timeout during the settle window still prints the digest when every listed check is already complete. With no PR argument it passes the current branch to `gh pr view`.
 - `pr`: after `gh pr ready`, wait again. The digest from before the PR was marked ready is not a clean result.
 
 ### Changed

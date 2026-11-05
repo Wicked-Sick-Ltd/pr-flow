@@ -56,7 +56,7 @@ installing.
 - [pr-wait.sh](skills/landing-prs/pr-wait.sh): wait for check runs and commit
   statuses, then print checks, reviews, unresolved threads and comments.
   Each poll pages GraphQL connections (100 per page) until checks, reviews,
-  threads and comments are complete. Default interval 90 seconds (minimum 60).
+  threads, thread replies and comments are complete. Default interval 90 seconds (minimum 60).
   Sleeps until the rate-limit reset when fewer than 500 points remain. A
   truncated page is an error, not a clean digest.
 
