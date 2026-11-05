@@ -10,35 +10,47 @@ RUN CONFIG from the user's arguments for this skill:
 - VERB: the first word (`create`, `watch`, `merge`, `land`, `status`, `sweep`;
   aliases: open/raise → create, monitor/ci → watch, ship → land). No verb → `status`
   if a PR exists for the current branch, else `create`.
-- PR: an optional number or URL; default the current branch's PR.
+- PR: an optional number or URL; default the current branch's PR. Once chosen,
+  that selector is the only PR for the rest of the verb.
 - REPO: `--repo owner/name`; default the current repo.
 - WAIT TOOL: `pr-wait.sh` lives in `skills/landing-prs/` next to this command's
   plugin root (`${PLUGIN_ROOT}/skills/landing-prs/pr-wait.sh`); run it with
   `bash`, in the background for long waits, and read its `SUMMARY` line.
 
+Pass that PR and `--repo OWNER/NAME` on every `pr-wait.sh` invocation and every
+`gh` command in the verb (`create`, `ready`, `comment`, `update-branch`,
+`merge`, `list`). A bare `gh pr ready` or a helper without `--repo` resolves
+the checkout, which can be a different pull request or repository. Sweep
+repeats the same `--repo` with each listed PR number.
+
 ## create
 1. If on `main`/`master`/`develop`: `git checkout -b fix/<slug>` (or `feat/`) first.
 2. Commit the pending work (one focused commit; attribution trailer per the
    session's rules), `git push -u origin <branch>`.
-3. `gh pr create --base <integration branch> --title … --body …` with the
-   Why / Root cause / What changed / Verification shape. Use `--draft` only
-   while work is still in progress. Critical-tier repos, and changes that
+3. `gh pr create --repo OWNER/NAME --base <integration branch> --title … --body …`
+   with the Why / Root cause / What changed / Verification shape. Use `--draft`
+   only while work is still in progress. Critical-tier repos, and changes that
    touch auth, payments, migrations, infra or secrets, may start as draft.
-4. Continue with **watch**. When the agent finishes, the PR must be ready for
-   review. **watch** runs `gh pr ready` if it is still a draft, then waits
+4. Continue with **watch**, using the new PR number and the same `--repo`.
+   When the agent finishes, the PR must be ready for review. **watch** runs
+   `gh pr ready <PR> --repo OWNER/NAME` if it is still a draft, then waits
    again. Never leave a completed PR as draft, and never finish on the digest
    from before `gh pr ready`.
 
 ## watch
-1. `pr-wait.sh <PR>` — wait for it (it polls; do not poll around it).
+1. `bash pr-wait.sh <PR> --repo OWNER/NAME` — wait for it (it polls; do not poll
+   around it).
 2. Triage the digest: every failed check and every `[OPEN]` review thread gets a
-   root-cause fix with a test, or a reasoned reply. Push, then re-run step 1.
-3. Stop when the helper exits 0, `checks_failed=0`, `unresolved_threads=0`,
-   and `truncated=0`. If the PR is still a draft, run `gh pr ready`, then go
-   back to step 1. Marking a draft ready can start workflows and reviewer bots
-   that did not run while it was a draft; the digest from before `gh pr ready`
-   is not a result you can finish on. Report the fresh digest in a short
-   table. Do **not** merge under this verb.
+   root-cause fix with a test, or a reasoned reply. Push, then re-run step 1
+   on the same PR and `--repo`.
+3. Stop when the helper exits 0, `checks_pending=0`, `checks_failed=0`,
+   `unresolved_threads=0`, and `truncated=0`. Exit 2 with a SUMMARY means checks
+   are still pending; that is not finished. If the PR is still a draft, run
+   `gh pr ready <PR> --repo OWNER/NAME`, then go back to step 1. Marking a
+   draft ready can start workflows and reviewer bots that did not run while it
+   was a draft; the digest from before `gh pr ready` is not a result you can
+   finish on. Report the fresh digest in a short table. Do **not** merge under
+   this verb.
 
 ## merge
 1. Run **watch** first. The precondition is watch's last digest, from after
@@ -47,15 +59,20 @@ RUN CONFIG from the user's arguments for this skill:
    or with `--admin`. Confirm the base branch matches the repo's flow. A
    finished agent marks the PR ready for review before this step; draft is not
    a resting state.
-3. Read `merge_state` from the pr-wait SUMMARY (`CLEAN`, `BEHIND`, `BLOCKED`,
-   `UNKNOWN`, …). If it is `BEHIND` (base moved since the checks ran, and the
-   repo requires an up-to-date branch), run `gh pr update-branch <PR>`, then go
-   back to step 1 — the checks must pass on the head that will actually merge.
-   `BLOCKED` means a rule you cannot satisfy from here (a required review, a
-   required check that never ran): report it, never `--admin` past it.
-   `UNKNOWN` is not a green light: report it and do not merge.
-4. `gh pr merge <PR> --squash --delete-branch` (`--rebase` where the repo prefers
-   it). If the repo's `AGENTS.md` names a post-merge deploy step, do it and verify.
+3. Read `merge_state` and `head=` from the pr-wait SUMMARY (`CLEAN`, `BEHIND`,
+   `BLOCKED`, `UNKNOWN`, …). If it is `BEHIND` (base moved since the checks
+   ran, and the repo requires an up-to-date branch), run
+   `gh pr update-branch <PR> --repo OWNER/NAME`, then go back to step 1 — the
+   checks must pass on the head that will actually merge. `BLOCKED` means a
+   rule you cannot satisfy from here (a required review, a required check that
+   never ran): report it, never `--admin` past it. `UNKNOWN` is not a green
+   light: report it and do not merge.
+4. `gh pr merge <PR> --repo OWNER/NAME --squash --delete-branch --match-head-commit <HEAD>`
+   (`--rebase` where the repo prefers it). `<HEAD>` is the `head=` value on
+   watch's last SUMMARY. If the head has changed, GitHub refuses the merge;
+   go back to step 1 and watch the new head. Do not merge a commit that was
+   not the one in that digest. If the repo's `AGENTS.md` names a post-merge
+   deploy step, do it and verify.
 5. Report: merged SHA, what deployed, what to watch next.
 
 ## land
@@ -64,17 +81,20 @@ The PR is ready for review before merge. Critical-tier repos still need an
 explicit go-ahead to merge.
 
 ## status
-`pr-wait.sh <PR> --no-wait`; answer: merged or not, checks state, unresolved
-threads (quote them), anything in the comments not yet actioned. If the work
-is finished and the PR is still draft, run `gh pr ready` and then **watch**
-again. The digest from before it was marked ready is stale.
+`bash pr-wait.sh <PR> --repo OWNER/NAME --no-wait`; answer: merged or not,
+checks state, unresolved threads (quote them), anything in the comments not
+yet actioned. Exit 2 with a SUMMARY means checks are still pending. If the
+work is finished and the PR is still draft, run
+`gh pr ready <PR> --repo OWNER/NAME` and then **watch** again. The digest from
+before it was marked ready is stale.
 
 ## sweep
-`gh pr list --state open --json number,title,headRefName,isDraft` for the repo
-(or `--repo` for each repo the user names); run **status** on each, then
-**watch** the ones with findings and **merge** the ones the user said to merge.
-A finished PR that is still draft gets `gh pr ready`.
-Summarise as one table: PR, state, failures, open threads, action taken.
+`gh pr list --repo OWNER/NAME --state open --json number,title,headRefName,isDraft`
+for the repo (repeat with each `--repo` the user names). Run **status** on
+each listed number with that same `--repo`, then **watch** the ones with
+findings and **merge** the ones the user said to merge. A finished PR that is
+still draft gets `gh pr ready <NUMBER> --repo OWNER/NAME`. Summarise as one
+table: PR, state, failures, open threads, action taken.
 
 ## Agent runtime
 

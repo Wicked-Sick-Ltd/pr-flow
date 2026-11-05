@@ -56,9 +56,17 @@ envelope() {
 }
 
 check_run() {
-  jq -cn --argjson id "$1" --arg name "$2" --arg status "$3" --arg conclusion "$4" --arg workflow "${5:-}" \
+  jq -cn --argjson id "$1" --arg name "$2" --arg status "$3" --arg conclusion "$4" \
+    --arg workflow "${5:-}" --arg wf_id "${6:-}" --arg app "${7:-}" --arg path "${8:-}" \
     '{__typename:"CheckRun", databaseId:$id, name:$name, status:$status, conclusion:(if $conclusion == "" then null else $conclusion end), title:"",
-      checkSuite:{app:null, workflowRun:(if $workflow == "" then null else {workflow:{name:$workflow}} end)}}'
+      checkSuite:{
+        app:(if $app == "" then null else {name:$app, slug:$app, databaseId:null} end),
+        workflowRun:(if ($workflow == "" and $wf_id == "" and $path == "") then null else {workflow:{
+          name:(if $workflow == "" then null else $workflow end),
+          path:(if $path == "" then null else $path end),
+          databaseId:(if $wf_id == "" then null else ($wf_id | tonumber) end)
+        }} end)
+      }}'
 }
 
 thread() {
@@ -110,6 +118,10 @@ case "$mode:$page" in
   pending:1) cat "$MOCK_FIXTURE/pending.json" ;;
   mixed-status:1) cat "$MOCK_FIXTURE/mixed-status.json" ;;
   workflows:1) cat "$MOCK_FIXTURE/workflows.json" ;;
+  same-name:1) cat "$MOCK_FIXTURE/same-name.json" ;;
+  same-id:1) cat "$MOCK_FIXTURE/same-id.json" ;;
+  paths:1) cat "$MOCK_FIXTURE/paths.json" ;;
+  apps:1) cat "$MOCK_FIXTURE/apps.json" ;;
   thread-comments:1) cat "$MOCK_FIXTURE/thread-comments.json" ;;
   thread-cursor:1) cat "$MOCK_FIXTURE/thread-cursor.json" ;;
   large-reviews:1) cat "$MOCK_FIXTURE/large-reviews.json" ;;
@@ -194,7 +206,7 @@ envelope "[$pending]" '[]' false "" false "" >"$FIX/pending.json"
 # 1. success / neutral / skipped are not failures
 log="$TMP/passing"
 MOCK_MODE=passing run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "passing conclusions" "$log.out" $? 0 "checks_failed=0 unresolved_threads=0 .* truncated=0"
+assert_summary "passing conclusions" "$log.out" $? 0 "head=abc123 .* checks_failed=0 unresolved_threads=0 .* truncated=0"
 
 # 2. stale and other non-passing completed conclusions fail closed
 log="$TMP/stale"
@@ -301,6 +313,43 @@ envelope "[$fail_a,$ok_b]" '[]' false "" false "" >"$FIX/workflows.json"
 log="$TMP/workflows"
 MOCK_MODE=workflows run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "workflows stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 14b. two workflow files can share a display name; the database id keeps them apart
+same_fail="$(check_run 1 test COMPLETED FAILURE CI 100)"
+same_ok="$(check_run 2 test COMPLETED SUCCESS CI 200)"
+envelope "[$same_fail,$same_ok]" '[]' false "" false "" >"$FIX/same-name.json"
+log="$TMP/same-name"
+MOCK_MODE=same-name run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "workflow ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 14c. the same workflow id still drops a cancelled predecessor of a later success
+rerun_cancel="$(check_run 10 test COMPLETED CANCELLED CI 100)"
+rerun_ok="$(check_run 11 test COMPLETED SUCCESS CI 100)"
+envelope "[$rerun_cancel,$rerun_ok]" '[]' false "" false "" >"$FIX/same-id.json"
+log="$TMP/same-id"
+MOCK_MODE=same-id run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "same workflow id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+# 14d. workflow path separates files when the API omits the database id
+path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" .github/workflows/ci.yml)"
+path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" .github/workflows/lint.yml)"
+envelope "[$path_fail,$path_ok]" '[]' false "" false "" >"$FIX/paths.json"
+log="$TMP/paths"
+MOCK_MODE=paths run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "workflow paths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 14e. non-Actions checks of the same name stay apart by app slug
+app_fail="$(check_run 1 scan COMPLETED FAILURE "" "" semgrep)"
+app_ok="$(check_run 2 scan COMPLETED SUCCESS "" "" codeql)"
+envelope "[$app_fail,$app_ok]" '[]' false "" false "" >"$FIX/apps.json"
+log="$TMP/apps"
+MOCK_MODE=apps run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "app identity stays separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 14f. --no-wait still prints the digest, and pending checks are not exit 0
+log="$TMP/nowait-pending"
+MOCK_MODE=pending run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "no-wait pending is not success" "$log.out" $? 2 "checks_total=1 checks_pending=1 checks_failed=0"
 
 # 15. a second page of replies on one thread is part of the digest
 thread_more="$(jq -cn '{id:"T1", isResolved:false, isOutdated:false, path:"skills/landing-prs/pr-wait.sh", line:1,

@@ -61,9 +61,12 @@ installing.
   truncated page is an error, not a clean digest.
 
 `watch` stops after triage. `land` merges when that is authorized. Keep the
-repository's branch rules. A zero exit from the helper means checks passed;
-also require `unresolved_threads=0` in its SUMMARY before merging. That line
-also reports `mergeable` and `merge_state`.
+repository's branch rules. A zero exit from the helper means every listed
+check is terminal and passed. A snapshot with checks still pending exits 2.
+Before merging, require `unresolved_threads=0` and pass the SUMMARY `head=`
+value to `gh pr merge --match-head-commit`. That line also reports
+`mergeable` and `merge_state`. Pass the selected PR and `--repo` on every
+helper and `gh` command.
 
 Review comments from Claude, Bugbot, Copilot, CodeQL and Semgrep are in scope.
 Every finding is fixed or answered, and every thread is resolved, before the

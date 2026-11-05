@@ -35,8 +35,13 @@
 #   least 60 seconds; a smaller value is a usage error.
 #   --dry-run prints the effective settings and does not call GitHub.
 # Exit codes:
-#   0 every check passed/neutral/skipped   1 a check failed, was cancelled or timed out
-#   2 gave up waiting (timeout)            3 usage, or gh kept failing (never reported as green)
+#   0 every listed check is terminal and passed/neutral/skipped
+#   1 a check failed, was cancelled or timed out
+#   2 gave up waiting (timeout), or the snapshot still has pending checks
+#   3 usage, or gh kept failing (never reported as green)
+#   --no-wait prints one snapshot and returns immediately. Exit 0 still
+#   requires every listed check to be terminal. Pending checks exit 2
+#   after the digest.
 # Needs: gh (authenticated), jq. Plain bash, no other deps. --dry-run needs neither.
 # HELP-END
 set -uo pipefail
@@ -175,7 +180,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
-                    checkSuite { app { name } workflowRun { workflow { name } } }
+                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId path name } } }
                   }
                   ... on StatusContext {
                     context
@@ -249,6 +254,21 @@ def lc: ascii_downcase;
             kind: "check",
             name: (.name // "check"),
             workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
+            group: (
+              if .checkSuite.workflowRun.workflow.databaseId != null then
+                "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
+              elif (.checkSuite.workflowRun.workflow.path // "") != "" then
+                "path:" + .checkSuite.workflowRun.workflow.path
+              elif .checkSuite.app.databaseId != null then
+                "app:" + (.checkSuite.app.databaseId | tostring)
+              elif (.checkSuite.app.slug // "") != "" then
+                "app:" + .checkSuite.app.slug
+              elif (.checkSuite.workflowRun.workflow.name // "") != "" then
+                "name:" + .checkSuite.workflowRun.workflow.name
+              elif (.checkSuite.app.name // "") != "" then
+                "name:" + .checkSuite.app.name
+              else "" end
+            ),
             status: ((.status // "PENDING") | lc),
             conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
             output: {title: (.title // "")}
@@ -400,16 +420,19 @@ cursor_or_die() {
   fi
 }
 
-# Check runs are deduped only within the same name and workflow (or app, when
-# there is no workflow). A later success drops an older cancelled run of that
-# same check. Commit statuses are never folded into a check run, even when the
-# context string matches the check name. A completed conclusion other than
-# success, neutral or skipped is a failure (including stale).
+# Check runs are deduped only within the same name and stable identity.
+# Identity is the workflow database id, else its path, else the app database
+# id or slug. The workflow display name is only a fallback when the API
+# omitted those, because two workflow files can share a name. A later success
+# drops an older cancelled run of that same check. Commit statuses are never
+# folded into a check run, even when the context string matches the check
+# name. A completed conclusion other than success, neutral or skipped is a
+# failure (including stale).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
     def newest_passing_only:
-      group_by([.name, (.workflow // "")])
+      group_by([.name, (.group // "")])
       | map(
           sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
           | if ($runs | length) < 2 then $runs
@@ -771,8 +794,13 @@ jq -r '.[] | "--- \(.created_at) \(.user.login)\n  \(.body | gsub("\r";"") | .[0
 [ "$(jq 'length' <<<"$comments")" -gt 0 ] || echo "(none)"
 
 echo
-echo "SUMMARY pr=$number checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state truncated=0"
-if [ "$failed" -eq 0 ]; then
-  exit 0
+echo "SUMMARY pr=$number head=$sha checks_total=$total checks_pending=$pending checks_failed=$failed unresolved_threads=$unresolved comments=$(jq 'length' <<<"$comments") state=$state mergeable=$mergeable merge_state=$merge_state truncated=0"
+# Exit 0 is only a finished green head. A --no-wait snapshot can still have
+# queued or in-progress checks; those are exit 2 with the digest printed.
+if [ "$failed" -gt 0 ]; then
+  exit 1
 fi
-exit 1
+if [ "$pending" -gt 0 ]; then
+  exit 2
+fi
+exit 0
