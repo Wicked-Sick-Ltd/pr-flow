@@ -21,7 +21,7 @@ Security reports go through [SECURITY.md](SECURITY.md).
 
 ## Tests
 
-The helper's regression tests use a fake `gh` and `git`. They need Bash and `jq`, and they make no network calls:
+The helper's regression tests use a fake `gh` and `git`. They need Bash, `jq`, and Python 3 (the large-review fixture is generated with `python3`). They make no network calls:
 
 ```bash
 bash skills/landing-prs/pr-wait_test.sh
