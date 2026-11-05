@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Marketplace-facing README, CONTRIBUTING.md, SECURITY.md, and a GitHub Actions run of `skills/landing-prs/pr-wait_test.sh`. Docs and repository hygiene only. The plugin release remains 1.1.0.
+
 ## 1.1.0 (2026-11-05)
 
 ### Fixed
