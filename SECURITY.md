@@ -10,9 +10,17 @@ Email **hello@wickedsick.com** with `[pr-flow security]` in the subject. That ad
 
 Use that email for security reports. Keep vulnerability details out of public issues and pull requests.
 
-This repository is private. GitHub private vulnerability reporting applies to public repositories, so the **Security → Report a vulnerability** form is a later path: once this repository is public and maintainers have enabled it, that form accepts reports too. The email above stays open either way.
+GitHub's **Security → Report a vulnerability** form is a second channel only after both of these are true: this repository is public, and a maintainer has enabled private vulnerability reporting. This policy does not claim that form is enabled. Until it is, email is the channel that accepts a report. After it is enabled, either channel is fine, and the email stays open.
 
 You can expect an acknowledgement within a few days.
+
+## After this repository is public
+
+These steps are for maintainers. They are not done by installing the plugin.
+
+1. Enable private vulnerability reporting, then confirm the form accepts a test report from a maintainer.
+2. Leave the email above in this file. The form does not replace it.
+3. Submit the package to a public marketplace only after the repository is public. Listed plugins are open source, and this package is MIT.
 
 ## Scope
 

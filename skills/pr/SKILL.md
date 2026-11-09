@@ -29,8 +29,8 @@ repeats the same `--repo` with each listed PR number.
    session's rules), `git push -u origin <branch>`.
 3. `gh pr create --repo OWNER/NAME --base <integration branch> --title … --body …`
    with the Why / Root cause / What changed / Verification shape. Use `--draft`
-   only while work is still in progress. Critical-tier repos, and changes that
-   touch auth, payments, migrations, infra or secrets, may start as draft.
+   only while work is still in progress. Changes that touch auth, payments,
+   migrations, infra, or secrets may start as draft.
 4. Continue with **watch**, using the new PR number and the same `--repo`.
    When the agent finishes, the PR must be ready for review. **watch** runs
    `gh pr ready <PR> --repo OWNER/NAME` if it is still a draft, then waits
@@ -55,18 +55,23 @@ repeats the same `--repo` with each listed PR number.
 ## merge
 1. Run **watch** first. The precondition is watch's last digest, from after
    any `gh pr ready`. Do not merge on a digest captured while the PR was draft.
-2. Refuse on a draft PR, on a Critical-tier repo without the user's explicit go,
-   or with `--admin`. Confirm the base branch matches the repo's flow. A
-   finished agent marks the PR ready for review before this step; draft is not
-   a resting state.
+2. Merge only when the user authorized it. Authorization is this verb's
+   caller having asked to merge, or `land` / `sweep` having been told to merge
+   this pull request, or standing permission the user recorded for this
+   repository that covers this change. Installing the plugin is not
+   authorization. A repository label is not authorization. If you cannot tell
+   whether the user authorized the merge, do not merge. A change that touches
+   auth, payments, migrations, infra, or secrets needs authorization that
+   covers that risk. If you cannot tell whether the change is in that set,
+   do not merge. Refuse a draft pull request. Never use `--admin`.
 3. Read `merge_state` and `head=` from the pr-wait SUMMARY (`CLEAN`, `BEHIND`,
    `BLOCKED`, `UNKNOWN`, …). If it is `BEHIND` (base moved since the checks
    ran, and the repo requires an up-to-date branch), run
    `gh pr update-branch <PR> --repo OWNER/NAME`, then go back to step 1 — the
    checks must pass on the head that will actually merge. `BLOCKED` means a
    rule you cannot satisfy from here (a required review, a required check that
-   never ran): report it, never `--admin` past it. `UNKNOWN` is not a green
-   light: report it and do not merge.
+   never ran): report it, never `--admin` past it. `UNKNOWN`, or any other
+   state you do not recognize, is not a green light: report it and do not merge.
 4. `gh pr merge <PR> --repo OWNER/NAME --squash --delete-branch --match-head-commit <HEAD>`
    (`--rebase` where the repo prefers it). `<HEAD>` is the `head=` value on
    watch's last SUMMARY. If the head has changed, GitHub refuses the merge;
@@ -76,9 +81,11 @@ repeats the same `--repo` with each listed PR number.
 5. Report: merged SHA, what deployed, what to watch next.
 
 ## land
-**create** then **merge**, one flow, no pause between unless something fails.
-The PR is ready for review before merge. Critical-tier repos still need an
-explicit go-ahead to merge.
+The user invoked `land`, or asked to land, ship, or merge. That request
+authorizes merge for this pull request, subject to the sensitive-change rule
+in **merge**. **create**, then **merge**. The pull request is ready for review
+before merge. If the request did not cover a sensitive change, or you cannot
+tell, stop and ask. Never `--admin`.
 
 ## status
 `bash pr-wait.sh <PR> --repo OWNER/NAME --no-wait`; answer: merged or not,
