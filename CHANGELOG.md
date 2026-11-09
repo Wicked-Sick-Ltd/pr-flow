@@ -21,7 +21,7 @@
 
 ### Changed
 
-- This repository is the canonical MIT home of PR Flow. Marketplace copies should vendor or sync from here.
+- This repository is the canonical MIT home of PR Flow. Marketplace copies and `ai-*-repo` checkouts should vendor or sync from here.
 - License is MIT, copyright Wicked Sick Ltd. Plugin manifests name this repository.
 - `landing-prs`: when an agent finishes, the pull request must be ready for review. Draft is only for work in progress. Critical-tier and sensitive changes may start as draft and flip to ready when the agent finishes.
 - Skill text points at your organisation's shipping and repository standards. It no longer names one internal conventions document.

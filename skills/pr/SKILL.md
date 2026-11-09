@@ -63,7 +63,10 @@ repeats the same `--repo` with each listed PR number.
    whether the user authorized the merge, do not merge. A change that touches
    auth, payments, migrations, infra, or secrets needs authorization that
    covers that risk. If you cannot tell whether the change is in that set,
-   do not merge. Refuse a draft pull request. Never use `--admin`.
+   do not merge. Refuse a draft pull request. Confirm the base branch matches
+   the repository's flow (`develop` where that repo has a staging flow,
+   otherwise its default branch). If it does not, stop and report it; do not
+   merge. Never use `--admin`.
 3. Read `merge_state` and `head=` from the pr-wait SUMMARY (`CLEAN`, `BEHIND`,
    `BLOCKED`, `UNKNOWN`, …). If it is `BEHIND` (base moved since the checks
    ran, and the repo requires an up-to-date branch), run
