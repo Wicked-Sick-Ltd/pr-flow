@@ -454,6 +454,42 @@ else
   tail -n 20 "$log.err" >&2
 fi
 
+# Permission wording is part of the offline suite. The helper tests above stay
+# network-free; these checks only read the plugin text.
+ROOT_DIR="$(cd "$ROOT/../.." && pwd)"
+forbid() {
+  local file="$1" needle="$2" label="$3"
+  if grep -q -F -- "$needle" "$file"; then
+    fail "$label"
+  else
+    ok "$label"
+  fi
+}
+require_text() {
+  local file="$1" needle="$2" label="$3"
+  if grep -q -F -- "$needle" "$file"; then
+    ok "$label"
+  else
+    fail "$label"
+  fi
+}
+for skill in "$ROOT_DIR/skills/landing-prs/SKILL.md" "$ROOT_DIR/skills/pr/SKILL.md"; do
+  base="$(basename "$(dirname "$skill")")/$(basename "$skill")"
+  forbid "$skill" "Craig" "$base has no personal standing-rule attribution"
+  forbid "$skill" "running autonomously" "$base does not grant autonomous merge"
+  forbid "$skill" "non-Critical" "$base does not treat a non-critical label as merge authority"
+done
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Installing the plugin is not authorization." "landing-prs states install is not merge authorization"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "must be ready for review" "landing-prs keeps ready-for-review"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" 'Never `--admin` past a refusal.' "landing-prs refuses admin bypass"
+require_text "$ROOT_DIR/skills/pr/SKILL.md" "Installing the plugin is not" "pr states install is not merge authorization"
+require_text "$ROOT_DIR/skills/pr/SKILL.md" "Never use \`--admin\`." "pr refuses admin bypass"
+require_text "$ROOT_DIR/skills/pr/SKILL.md" "Confirm the base branch matches" "pr confirms the base branch before merge"
+forbid "$ROOT_DIR/SECURITY.md" "This repository is private." "SECURITY.md does not claim a visibility"
+forbid "$ROOT_DIR/SECURITY.md" "that form accepts reports" "SECURITY.md does not claim the GitHub form is already open"
+require_text "$ROOT_DIR/SECURITY.md" "hello@wickedsick.com" "SECURITY.md keeps the email channel"
+require_text "$ROOT_DIR/SECURITY.md" "does not claim that form is enabled" "SECURITY.md keeps the form conditional"
+
 echo
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

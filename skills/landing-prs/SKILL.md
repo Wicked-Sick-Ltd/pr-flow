@@ -21,16 +21,15 @@ standards, follow those gates as well.
 2. **Open.** Push the branch; `gh pr create --repo OWNER/NAME` against the
    repo's integration branch (`develop` where the repo has a staging flow,
    else the default branch). Body: *Why / Root cause or design / What changed / Verification*,
-   honest about what was not verified. **Standing rule (Craig, 5 Nov 2026):
-   when the agent is finished, the PR must be ready for review — never leave a
-   completed PR as draft.** Use `--draft` only while work is still in
-   progress; as soon as the agent stops, run `gh pr ready <PR> --repo OWNER/NAME`
-   (or create without `--draft`). Critical-tier / auth / payments / migrations /
-   infra / secrets work may start as draft during WIP, but must flip to ready
-   for review the moment the agent finishes so reviewers get rolling. After
-   `gh pr ready <PR> --repo OWNER/NAME`, go back to step 3. Workflows and
+   honest about what was not verified. When the agent is finished, the pull
+   request must be ready for review. Never leave a completed pull request as
+   draft. Use `--draft` only while work is still in progress. Changes that
+   touch auth, payments, migrations, infra, or secrets may start as draft,
+   and must be marked ready when the agent finishes so reviewers can see them.
+   Run `gh pr ready <PR> --repo OWNER/NAME` (or create without `--draft`).
+   After `gh pr ready <PR> --repo OWNER/NAME`, go back to step 3. Workflows and
    reviewer bots that skipped the draft may still be starting, and the digest
-   from before the PR was marked ready does not count.
+   from before the pull request was marked ready does not count.
 3. **Wait.** Run `pr-wait.sh <PR> --repo OWNER/NAME` from this skill's directory
    (see `--help`). Pass that same PR and `--repo` on every later `gh` command.
    It returns only when every check run on the head commit is terminal, and
@@ -59,17 +58,29 @@ standards, follow those gates as well.
    finding you disagree with gets a reply explaining why, never silence.
    Resolve threads you addressed.
    Review comments from Claude, Bugbot, Copilot, CodeQL and Semgrep all count: every finding is fixed or answered, and every thread is resolved, before the PR counts as done.
-5. **Merge** when asked to merge/land/ship, or when running autonomously on a
-   non-Critical repo: `gh pr merge <PR> --repo OWNER/NAME --squash --delete-branch --match-head-commit <HEAD>`
+5. **Merge** only when the latest digest is clean and the person who installed
+   or invoked this plugin has authorized this merge. Authorization is an
+   explicit request in the session to merge, land, or ship this pull request,
+   or standing permission that person recorded for this repository and that
+   covers this change (for example in the repository's `AGENTS.md`).
+   Installing the plugin is not authorization. A repository label is not
+   authorization. If you cannot tell whether the user authorized the merge,
+   do not merge. Report the digest and ask. A change that touches auth,
+   payments, migrations, infra, or secrets needs authorization that covers
+   that risk. If you cannot tell whether the change is in that set, do not
+   merge. Ask.
+   The command, only after that, is `gh pr merge <PR> --repo OWNER/NAME --squash --delete-branch --match-head-commit <HEAD>`
    (rebase where the repo prefers it; use a merge commit only where the
    repository allows one). `<HEAD>` is the `head=` value on the latest pr-wait
-   SUMMARY. If the head has changed since that digest, the merge refuses; go
-   back to step 3 and wait on the new head. Do not merge a commit the digest
-   did not cover. Read `merge_state` from that same SUMMARY. If it is `BEHIND`
-   (the base moved since the checks ran), `gh pr update-branch <PR> --repo OWNER/NAME`
-   and go back to step 3 — checks must pass on the head that merges. `BLOCKED`
-   means a rule you cannot satisfy from here: report it. `UNKNOWN` is not
-   settled: do not merge on it. Never `--admin` past a refusal.
+   SUMMARY, and that SUMMARY must be from after the pull request was ready
+   for review. If the head has changed since that digest, the merge refuses;
+   go back to step 3 and wait on the new head. Do not merge a commit the
+   digest did not cover. Read `merge_state` from that same SUMMARY. If it is
+   `BEHIND` (the base moved since the checks ran), `gh pr update-branch <PR> --repo OWNER/NAME`
+   and go back to step 3. Checks must pass on the head that merges. `BLOCKED`
+   means a rule you cannot satisfy from here: report it. `UNKNOWN`, or any
+   other state you do not recognize, is not settled: do not merge on it.
+   Never `--admin` past a refusal.
 6. **Deploy** if the repo's `AGENTS.md` names a post-merge step (for example
    `git pull` on a server with an editable install). Then report.
 
@@ -87,7 +98,7 @@ still needs reviewing. Urgency you inferred yourself is not an order.
 |---|---|
 | "push and create a PR", "raise the PR" | steps 1–3, report the digest |
 | "watch CI", "keep an eye on the PR", "wait for comments and fix" | steps 3–4 until clean |
-| "merge", "merge once green", "ship it", "land it" | steps 3–6 |
+| "merge", "merge once green", "ship it", "land it" | steps 3–6 only when that request authorizes the merge; otherwise ask |
 | "did this merge?", "anything missed in the comments?" | `pr-wait.sh <PR> --repo OWNER/NAME --no-wait`, then report |
 | "check all outstanding PRs" | `gh pr list --repo OWNER/NAME`, then this table per PR |
 

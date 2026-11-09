@@ -1,19 +1,19 @@
 # PR Flow
 
-Open a GitHub pull request, wait until CI and reviewer bots finish, answer every finding, and merge only when the digest is clean.
+Open a GitHub pull request, wait until CI and reviewer bots finish, answer every finding, and merge only when the user has authorized it and the digest is clean.
 
 **PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Current release: **1.1.0**.
 
-This repository is the source of truth. Marketplace copies, including `Wicked-Sick-Ltd/ai-marketplace`, and `ai-*-repo` checkouts vendor from here. See [VENDORED.md](VENDORED.md).
+This repository is the source of truth. Marketplace copies, including `Wicked-Sick-Ltd/ai-marketplace`, vendor from here. See [VENDORED.md](VENDORED.md).
 
 ## What it does
 
 1. Branch off the default branch and open a pull request against the repository's integration branch.
 2. Wait until every check run and commit status on the head commit has finished. Reviewer bots that register a check (Claude, Bugbot, Copilot, CodeQL, Semgrep, and the repository's own workflows) are part of that wait.
 3. Fix each failed check and each open review thread, or reply with the reason, then wait again.
-4. Merge when the digest is clean: `checks_pending=0`, `checks_failed=0`, `unresolved_threads=0`, `truncated=0`, and `head=` is the commit that will merge.
+4. Merge when the user has authorized it and the digest is clean: `checks_pending=0`, `checks_failed=0`, `unresolved_threads=0`, `truncated=0`, and `head=` is the commit that will merge. Installing the plugin is not that authorization. If the user did not ask to merge, or the change touches auth, payments, migrations, infra, or secrets and the request does not cover that risk, the agent asks instead of merging.
 
-A finished pull request is **ready for review**. Use a draft while work is still in progress. Critical-tier changes (auth, payments, migrations, infra, secrets) may start as a draft and become ready when the agent stops.
+A finished pull request is **ready for review**. Use a draft while work is still in progress. Changes that touch auth, payments, migrations, infra, or secrets may start as a draft and become ready when the agent stops.
 
 ## Install for Cursor
 
@@ -36,6 +36,8 @@ Start a new agent session after installing so the skills load.
 Ask the agent:
 
 > Land this. Open the pull request, wait for CI and the reviewer bots, fix what they find, and merge when the digest is clean.
+
+That request is what authorizes the merge. The agent still asks when the change touches auth, payments, migrations, infra, or secrets and this request did not cover that risk.
 
 The agent follows [landing-prs](skills/landing-prs/SKILL.md). To print one digest for pull request 42 without waiting:
 

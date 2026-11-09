@@ -6,6 +6,12 @@
 
 - Marketplace-facing README, CONTRIBUTING.md, SECURITY.md, and a GitHub Actions run of `skills/landing-prs/pr-wait_test.sh`. Docs and repository hygiene only. The plugin release remains 1.1.0.
 
+### Changed
+
+- `landing-prs` and `pr` merge only when the installing user has explicitly asked, or has recorded standing permission that covers the change. Installing the plugin is not permission to merge, and neither is a repository label. Unknown merge state, or a sensitive change the request does not cover, does not merge. Finished work is still ready for review, and `--admin` is still refused. The plugin release remains 1.1.0.
+- SECURITY.md no longer describes repository visibility. Email remains the report channel. GitHub's vulnerability form is described as available only after the repository is public and a maintainer has enabled it.
+- Current docs name this repository as the vendor source for marketplace copies.
+
 ## 1.1.0 (2026-11-05)
 
 ### Fixed

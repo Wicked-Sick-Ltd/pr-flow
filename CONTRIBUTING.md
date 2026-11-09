@@ -1,6 +1,6 @@
 # Contributing to pr-flow
 
-Bug reports, fixes, and small improvements are welcome. This repository is the canonical plugin. Send changes here. Vendored copies in `Wicked-Sick-Ltd/ai-marketplace` and `ai-*-repo` checkouts follow this tree.
+Bug reports, fixes, and small improvements are welcome. This repository is the canonical plugin. Send changes here. Vendored copies, including `Wicked-Sick-Ltd/ai-marketplace`, follow this tree.
 
 ## Proposing a change
 
