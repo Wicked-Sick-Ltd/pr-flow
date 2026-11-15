@@ -24,11 +24,18 @@ the checkout, which can be a different pull request or repository. Sweep
 repeats the same `--repo` with each listed PR number.
 
 ## create
-1. If on `main`/`master`/`develop`: `git checkout -b fix/<slug>` (or `feat/`) first.
+1. If on `main`/`master` or a staging name (`staging`/`dev`/`develop`/
+   `development`): `git checkout -b fix/<slug>` (or `feat/`) first.
 2. Commit the pending work (one focused commit; attribution trailer per the
    session's rules), `git push -u origin <branch>`.
 3. `gh pr create --repo OWNER/NAME --base <integration branch> --title … --body …`
-   with the Why / Root cause / What changed / Verification shape. Use `--draft`
+   with the Why / Root cause / What changed / Verification shape. Choose the
+   base: when the default branch has a source-branch rule, use the first of
+   `staging`, `dev`, `develop`, `development` that exists on the remote;
+   otherwise use `main`/`master` from `defaultBranchRef`. Establish that rule
+   from the repository's `git-rules` custom property, classic branch
+   protection, and required status checks — not from `rules/branches` alone.
+   A missing, null, or empty `git-rules` value is not a policy. Use `--draft`
    only while work is still in progress. Changes that touch auth, payments,
    migrations, infra, or secrets may start as draft.
 4. Continue with **watch**, using the new PR number and the same `--repo`.
@@ -55,6 +62,8 @@ repeats the same `--repo` with each listed PR number.
 ## merge
 1. Run **watch** first. The precondition is watch's last digest, from after
    any `gh pr ready`. Do not merge on a digest captured while the PR was draft.
+   Merge only from a post-ready SUMMARY; ready after wait → re-run wait and
+   triage.
 2. Merge only when the user authorized it. Authorization is this verb's
    caller having asked to merge, or `land` / `sweep` having been told to merge
    this pull request, or standing permission the user recorded for this
@@ -64,9 +73,9 @@ repeats the same `--repo` with each listed PR number.
    auth, payments, migrations, infra, or secrets needs authorization that
    covers that risk. If you cannot tell whether the change is in that set,
    do not merge. Refuse a draft pull request. Confirm the base branch matches
-   the repository's flow (`develop` where that repo has a staging flow,
-   otherwise its default branch). If it does not, stop and report it; do not
-   merge. Never use `--admin`.
+   the repository's flow (staging names where that repo has a source-branch
+   rule, otherwise its default branch). If it does not, stop and report it; do
+   not merge. Never use `--admin`.
 3. Read `merge_state` and `head=` from the pr-wait SUMMARY (`CLEAN`, `BEHIND`,
    `BLOCKED`, `UNKNOWN`, …). If it is `BEHIND` (base moved since the checks
    ran, and the repo requires an up-to-date branch), run
@@ -103,8 +112,19 @@ before it was marked ready is stale.
 for the repo (repeat with each `--repo` the user names). Run **status** on
 each listed number with that same `--repo`, then **watch** the ones with
 findings and **merge** the ones the user said to merge. A finished PR that is
-still draft gets `gh pr ready <NUMBER> --repo OWNER/NAME`. Summarise as one
-table: PR, state, failures, open threads, action taken.
+still draft gets `gh pr ready <NUMBER> --repo OWNER/NAME`. Watch every draft
+that step marks ready — including one whose first status was already clean —
+and report that later digest, not the pre-ready one. create, watch, merge, and
+sweep must pass that item's number and `--repo` on every helper and `gh`
+command. Summarise as one table: PR, state, failures, open threads, action
+taken.
+
+## Wake-ups
+
+While watching, reply only when something changed: a new commit, a check that
+failed or recovered, a new unresolved review thread, a merge, a close, a
+conflict, or the wait becoming stuck. Echo, re-review with no new findings, or
+CI still running with nothing new → no message.
 
 ## Agent runtime
 

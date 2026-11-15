@@ -8,12 +8,12 @@ This repository is the source of truth. Marketplace copies, including `Wicked-Si
 
 ## What it does
 
-1. Branch off the default branch and open a pull request against the repository's integration branch.
+1. Branch off the default branch (never commit on `main`/`master` or on `staging`/`dev`/`develop`/`development`). Open a pull request against the repository's integration branch: when the default branch has a source-branch rule, the first existing of `staging`, `dev`, `develop`, `development`; otherwise `main`/`master` from `defaultBranchRef`. That rule comes from the repository's `git-rules` custom property, classic branch protection, and required checks — not from `rules/branches` alone. A missing, null, or empty `git-rules` value is not a policy.
 2. Wait until every check run and commit status on the head commit has finished. Reviewer bots that register a check (Claude, Bugbot, Copilot, CodeQL, Semgrep, and the repository's own workflows) are part of that wait.
-3. Fix each failed check and each open review thread, or reply with the reason, then wait again.
-4. Merge when the user has authorized it and the digest is clean: `checks_pending=0`, `checks_failed=0`, `unresolved_threads=0`, `truncated=0`, and `head=` is the commit that will merge. Installing the plugin is not that authorization. If the user did not ask to merge, or the change touches auth, payments, migrations, infra, or secrets and the request does not cover that risk, the agent asks instead of merging.
+3. Fix each failed check and each open review thread, or reply with the reason, then wait again. While watching, reply only when something changed (new commit, check failed or recovered, new unresolved thread, merge, close, conflict, or stuck). Echo, re-review with no new findings, or CI still running → no message.
+4. Merge when the user has authorized it and the digest is clean: `checks_pending=0`, `checks_failed=0`, `unresolved_threads=0`, `truncated=0`, and `head=` is the commit that will merge. Merge only from a post-ready SUMMARY. Installing the plugin is not that authorization. If the user did not ask to merge, or the change touches auth, payments, migrations, infra, or secrets and the request does not cover that risk, the agent asks instead of merging.
 
-A finished pull request is **ready for review**. Use a draft while work is still in progress. Changes that touch auth, payments, migrations, infra, or secrets may start as a draft and become ready when the agent stops.
+A finished pull request is **ready for review**. `--draft` is WIP-only. Changes that touch auth, payments, migrations, infra, or secrets may start as a draft and become ready when the agent stops. Mark ready with `gh pr ready <number> --repo OWNER/NAME` (never a bare `gh pr ready`). After ready, wait and triage again before merge. Sweep watches every draft it marks ready (including one whose first status was already clean) and reports that later digest; create, watch, merge, and sweep pass that item's number and `--repo`.
 
 ## Install for Cursor
 

@@ -126,6 +126,9 @@ command -v jq >/dev/null || die "jq not found"
 # gh_try LABEL gh-args... — up to 3 attempts; prints stdout of the first success.
 # A persistent failure is fatal (exit 3): a rate limit or 502 must never be
 # read back as "no checks", "no threads" or "no comments".
+# Every capture MUST be `result="$(gh_try ...)" || exit 3`. die inside $(...)
+# only exits the subshell (this script does not use set -e), so without
+# `|| exit 3` a failed call leaves an empty string and can look like no checks.
 gh_try() {
   local label="$1"
   shift
@@ -150,8 +153,10 @@ gh_try() {
 
 # One page of a poll. Each connection is at most 100 nodes; follow endCursor
 # until hasNextPage is false. Replies on a review thread are paged the same
-# way. Do not add another nested connection without rechecking the point cost
-# (nodes/100, minimum 1, plus thread comments).
+# way. Checks come from headRef.target (the PR head), not commits(last:1),
+# which is ordered by commit time and can lag headRefOid. Do not add another
+# nested connection without rechecking the point cost (nodes/100, minimum 1,
+# plus thread comments). Workflow has no `path` field — only review threads do.
 POLL_QUERY=$(cat <<'EOF'
 query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $reviewsAfter:String, $threadsAfter:String, $commentsAfter:String) {
   rateLimit { remaining resetAt cost }
@@ -165,10 +170,10 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
       headRefOid
       headRefName
       baseRefName
-      commits(last:1) {
-        nodes {
-          commit {
-            oid
+      headRef {
+        target {
+          oid
+          ... on Commit {
             statusCheckRollup {
               contexts(first:100, after:$contextsAfter) {
                 pageInfo { hasNextPage endCursor }
@@ -180,7 +185,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
-                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId path name } } }
+                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId name } } }
                   }
                   ... on StatusContext {
                     context
@@ -221,11 +226,87 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
 EOF
 )
 
+# Fallback when headRef is null (e.g. after gh pr merge --delete-branch) but
+# headRefOid still names the landed commit. First page of contexts is enough.
+HEAD_COMMIT_QUERY=$(cat <<'EOF'
+query($owner:String!, $name:String!, $oid:GitObjectID!) {
+  rateLimit { remaining resetAt cost }
+  repository(owner:$owner, name:$name) {
+    object(oid:$oid) {
+      ... on Commit {
+        oid
+        statusCheckRollup {
+          contexts(first:100) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              __typename
+              ... on CheckRun {
+                databaseId
+                name
+                status
+                conclusion
+                title
+                checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId name } } }
+              }
+              ... on StatusContext {
+                context
+                state
+                description
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+EOF
+)
+
 PARSE_JQ=$(cat <<'EOF'
 def lc: ascii_downcase;
+def check_nodes:
+  map(
+    if .__typename == "CheckRun" then {
+      id: (.databaseId // .name),
+      kind: "check",
+      name: (.name // "check"),
+      workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
+      group: (
+        if .checkSuite.workflowRun.workflow.databaseId != null then
+          "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
+        elif .checkSuite.app.databaseId != null then
+          "app:" + (.checkSuite.app.databaseId | tostring)
+        elif (.checkSuite.app.slug // "") != "" then
+          "app:" + .checkSuite.app.slug
+        elif (.checkSuite.workflowRun.workflow.name // "") != "" then
+          "name:" + .checkSuite.workflowRun.workflow.name
+        elif (.checkSuite.app.name // "") != "" then
+          "name:" + .checkSuite.app.name
+        else "" end
+      ),
+      status: ((.status // "PENDING") | lc),
+      conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
+      output: {title: (.title // "")}
+    }
+    elif .__typename == "StatusContext" then {
+      id: ("status:" + (.context // "status")),
+      kind: "status",
+      workflow: "",
+      name: (.context // "status"),
+      status: (if (.state == "PENDING" or .state == "EXPECTED") then "pending" else "completed" end),
+      conclusion: (
+        if .state == "SUCCESS" then "success"
+        elif (.state == "FAILURE" or .state == "ERROR") then "failure"
+        else null end
+      ),
+      output: {title: (.description // "")}
+    }
+    else empty end
+  );
 .data as $root
 | $root.repository.pullRequest as $pr
-| ($pr.commits.nodes[0].commit // null) as $commit
+| ($pr.headRef.target // null) as $commit
 | ($commit.statusCheckRollup.contexts // null) as $contexts
 | {
     number: $pr.number,
@@ -246,49 +327,7 @@ def lc: ascii_downcase;
     reviews_cursor: ($pr.reviews.pageInfo.endCursor // ""),
     comments_more: ($pr.comments.pageInfo.hasNextPage // false),
     comments_cursor: ($pr.comments.pageInfo.endCursor // ""),
-    checks: (
-      ($contexts.nodes // [])
-      | map(
-          if .__typename == "CheckRun" then {
-            id: (.databaseId // .name),
-            kind: "check",
-            name: (.name // "check"),
-            workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
-            group: (
-              if .checkSuite.workflowRun.workflow.databaseId != null then
-                "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
-              elif (.checkSuite.workflowRun.workflow.path // "") != "" then
-                "path:" + .checkSuite.workflowRun.workflow.path
-              elif .checkSuite.app.databaseId != null then
-                "app:" + (.checkSuite.app.databaseId | tostring)
-              elif (.checkSuite.app.slug // "") != "" then
-                "app:" + .checkSuite.app.slug
-              elif (.checkSuite.workflowRun.workflow.name // "") != "" then
-                "name:" + .checkSuite.workflowRun.workflow.name
-              elif (.checkSuite.app.name // "") != "" then
-                "name:" + .checkSuite.app.name
-              else "" end
-            ),
-            status: ((.status // "PENDING") | lc),
-            conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
-            output: {title: (.title // "")}
-          }
-          elif .__typename == "StatusContext" then {
-            id: ("status:" + (.context // "status")),
-            kind: "status",
-            workflow: "",
-            name: (.context // "status"),
-            status: (if (.state == "PENDING" or .state == "EXPECTED") then "pending" else "completed" end),
-            conclusion: (
-              if .state == "SUCCESS" then "success"
-              elif (.state == "FAILURE" or .state == "ERROR") then "failure"
-              else null end
-            ),
-            output: {title: (.description // "")}
-          }
-          else empty end
-        )
-    ),
+    checks: (($contexts.nodes // []) | check_nodes),
     reviews: [
       $pr.reviews.nodes[]?
       | {
@@ -324,6 +363,61 @@ def lc: ascii_downcase;
           user: {login: (.author.login // "unknown")}
         }
     ]
+  }
+EOF
+)
+
+# Same check_nodes mapping for the head-commit object fallback.
+HEAD_COMMIT_PARSE_JQ=$(cat <<'EOF'
+def lc: ascii_downcase;
+def check_nodes:
+  map(
+    if .__typename == "CheckRun" then {
+      id: (.databaseId // .name),
+      kind: "check",
+      name: (.name // "check"),
+      workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
+      group: (
+        if .checkSuite.workflowRun.workflow.databaseId != null then
+          "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
+        elif .checkSuite.app.databaseId != null then
+          "app:" + (.checkSuite.app.databaseId | tostring)
+        elif (.checkSuite.app.slug // "") != "" then
+          "app:" + .checkSuite.app.slug
+        elif (.checkSuite.workflowRun.workflow.name // "") != "" then
+          "name:" + .checkSuite.workflowRun.workflow.name
+        elif (.checkSuite.app.name // "") != "" then
+          "name:" + .checkSuite.app.name
+        else "" end
+      ),
+      status: ((.status // "PENDING") | lc),
+      conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
+      output: {title: (.title // "")}
+    }
+    elif .__typename == "StatusContext" then {
+      id: ("status:" + (.context // "status")),
+      kind: "status",
+      workflow: "",
+      name: (.context // "status"),
+      status: (if (.state == "PENDING" or .state == "EXPECTED") then "pending" else "completed" end),
+      conclusion: (
+        if .state == "SUCCESS" then "success"
+        elif (.state == "FAILURE" or .state == "ERROR") then "failure"
+        else null end
+      ),
+      output: {title: (.description // "")}
+    }
+    else empty end
+  );
+.data as $root
+| $root.repository.object as $commit
+| ($commit.statusCheckRollup.contexts // null) as $contexts
+| {
+    remaining: $root.rateLimit.remaining,
+    resetAt: $root.rateLimit.resetAt,
+    commit: ($commit.oid // null),
+    missing: ($commit == null),
+    checks: (if $commit == null then [] else (($contexts.nodes // []) | check_nodes) end)
   }
 EOF
 )
@@ -367,7 +461,8 @@ note_rate_limit() {
 
 read_rate_limit() {
   local raw
-  raw="$(gh_try "rate limit" api graphql -f query='query { rateLimit { remaining resetAt } }')"
+  # || exit 3: die inside $(gh_try) only exits the subshell.
+  raw="$(gh_try "rate limit" api graphql -f query='query { rateLimit { remaining resetAt } }')" || exit 3
   if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
     die "rate limit query failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
   fi
@@ -421,13 +516,13 @@ cursor_or_die() {
 }
 
 # Check runs are deduped only within the same name and stable identity.
-# Identity is the workflow database id, else its path, else the app database
-# id or slug. The workflow display name is only a fallback when the API
-# omitted those, because two workflow files can share a name. A later success
-# drops an older cancelled run of that same check. Commit statuses are never
-# folded into a check run, even when the context string matches the check
-# name. A completed conclusion other than success, neutral or skipped is a
-# failure (including stale).
+# Identity is the workflow database id, else the app database id or slug,
+# else the workflow or app display name. Two workflow files can share a
+# name, so the database id is preferred when the API returns it. A later
+# success drops an older cancelled run of that same check. Commit statuses
+# are never folded into a check run, even when the context string matches
+# the check name. A completed conclusion other than success, neutral or
+# skipped is a failure (including stale).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
@@ -505,7 +600,8 @@ page_thread_comments() {
         die "review thread comments are truncated and have no endCursor; refusing a partial digest"
       fi
       guard_rate_limit
-      raw="$(gh_try "thread comments" api graphql -f query="$THREAD_COMMENT_QUERY" -f id="$id" -f after="$cursor")"
+      # || exit 3: die inside $(gh_try) only exits the subshell.
+      raw="$(gh_try "thread comments" api graphql -f query="$THREAD_COMMENT_QUERY" -f id="$id" -f after="$cursor")" || exit 3
       if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
         die "thread comments failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
       fi
@@ -571,7 +667,8 @@ if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
       die "no pull request given and the current branch could not be resolved; pass a PR number, URL, or branch"
     fi
   fi
-  meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)"
+  # || exit 3: die inside $(gh_try) only exits the subshell.
+  meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)" || exit 3
   if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$meta"; then
     die "pr view failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$meta")"
   fi
@@ -597,6 +694,8 @@ url=""
 base=""
 state=""
 sha=""
+commit_oid=""
+checks_unsettled=0
 total=0
 pending=0
 start=$(now)
@@ -636,7 +735,8 @@ fetch_snapshot() {
     if [ -n "$reviews_after" ]; then args+=(-f reviewsAfter="$reviews_after"); else args+=(-F reviewsAfter=null); fi
     if [ -n "$threads_after" ]; then args+=(-f threadsAfter="$threads_after"); else args+=(-F threadsAfter=null); fi
     if [ -n "$comments_after" ]; then args+=(-f commentsAfter="$comments_after"); else args+=(-F commentsAfter=null); fi
-    raw="$(gh_try "poll" "${args[@]}")"
+    # || exit 3: die inside $(gh_try) only exits the subshell.
+    raw="$(gh_try "poll" "${args[@]}")" || exit 3
     if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
       die "poll failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
     fi
@@ -693,6 +793,31 @@ fetch_snapshot() {
     fi
   done
 
+  # After gh pr merge --delete-branch, headRef is null while headRefOid may
+  # still name the landed commit. Load checks via object(oid:) — never from
+  # commits(last:1), which can lag the head.
+  snap_unsettled=0
+  if [ -z "$snap_commit" ] && [ -n "$snap_sha" ]; then
+    guard_rate_limit
+    # || exit 3: die inside $(gh_try) only exits the subshell.
+    raw="$(gh_try "head commit" api graphql -f query="$HEAD_COMMIT_QUERY" -f owner="$owner" -f name="$repo_name" -f oid="$snap_sha")" || exit 3
+    if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
+      die "head commit failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
+    fi
+    parsed="$(jq -c "$HEAD_COMMIT_PARSE_JQ" <<<"$raw")" || die "could not parse head commit response"
+    note_rate_limit "$(jq -r '.remaining // empty' <<<"$parsed")" "$(jq -r '.resetAt // empty' <<<"$parsed")"
+    head_oid="$(jq -r '.commit // empty' <<<"$parsed")"
+    if [ "$(jq -r '.missing' <<<"$parsed")" = true ] || [ -z "$head_oid" ]; then
+      echo "pr-wait: head ${snap_sha} has no commit object; refusing an empty-check result" >&2
+      snap_unsettled=1
+      printf '%s' '[]' >"$checks_file"
+    else
+      snap_commit="$head_oid"
+      piece="$(jq -c '.checks' <<<"$parsed")" || die "could not read checks from head commit"
+      printf '%s' "$piece" >"$checks_file"
+    fi
+  fi
+
   page_thread_comments "$threads_file"
   checks="$(cat "$checks_file")" || die "could not read accumulated checks"
   reviews="$(cat "$reviews_file")" || die "could not read accumulated reviews"
@@ -705,6 +830,7 @@ fetch_snapshot() {
   state="$snap_state"
   sha="$snap_sha"
   commit_oid="$snap_commit"
+  checks_unsettled="$snap_unsettled"
   mergeable="$snap_mergeable"
   merge_state="$snap_merge_state"
   return 0
@@ -724,13 +850,16 @@ while :; do
     echo "pr-wait: $url  ($state, base $base)"
     banner_done=1
   fi
-  # Checks are read from commits(last:1), which can lag headRefOid after a
-  # push. Advertising the newer SHA as head= would let --match-head-commit
-  # merge a commit whose checks were never read.
+  # Checks are read from headRef.target (or object(oid:) when headRef is gone).
+  # Advertising a newer SHA as head= would let --match-head-commit merge a
+  # commit whose checks were never read.
   head_mismatch=0
   if [ -n "$commit_oid" ] && [ "$commit_oid" != "$sha" ]; then
     head_mismatch=1
     echo "pr-wait: head ${sha} differs from the commit that carries checks (${commit_oid}); refusing a clean result for ${sha}" >&2
+  fi
+  if [ "$checks_unsettled" -eq 1 ]; then
+    head_mismatch=1
   fi
 
   if [ "$sha" != "$last_sha" ]; then
@@ -751,7 +880,8 @@ while :; do
   else
     stable_since=""
   fi
-  if [ "$total" -eq 0 ] && [ "$elapsed" -ge "$GRACE" ] && [ "$head_mismatch" -eq 0 ]; then
+  # A missing head commit object must not take the empty-check grace path.
+  if [ "$total" -eq 0 ] && [ "$elapsed" -ge "$GRACE" ] && [ "$head_mismatch" -eq 0 ] && [ "$checks_unsettled" -eq 0 ]; then
     echo "pr-wait: no check runs registered after ${GRACE}s — nothing to wait for (verify the repo has CI/bots before treating this as green)"; break
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
@@ -759,6 +889,10 @@ while :; do
     # is the truthful result; exit 2 would claim those checks are in progress.
     if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ] && [ "$head_mismatch" -eq 0 ]; then
       echo "pr-wait: timed out during settle after ${TIMEOUT}s with all $total check(s) complete; emitting the digest"
+      break
+    fi
+    if [ "$checks_unsettled" -eq 1 ]; then
+      echo "pr-wait: timed out after ${TIMEOUT}s and head ${sha} has no commit object" >&2
       break
     fi
     if [ "$head_mismatch" -eq 1 ]; then
@@ -815,7 +949,9 @@ echo "SUMMARY pr=$number head=$checked checks_total=$total checks_pending=$pendi
 # queued or in-progress checks; those are exit 2 with the digest printed.
 # A digest whose checks belong to an older commit than the PR head is also
 # exit 2, and head= names that older commit so merge cannot pin the new one.
-if [ "$head_mismatch" -eq 1 ]; then
+# A missing head commit object (deleted ref, object gone) is exit 2, not the
+# empty-check grace success path.
+if [ "$head_mismatch" -eq 1 ] || [ "$checks_unsettled" -eq 1 ]; then
   exit 2
 fi
 if [ "$failed" -gt 0 ]; then

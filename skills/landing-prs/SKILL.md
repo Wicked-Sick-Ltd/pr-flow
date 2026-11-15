@@ -1,6 +1,6 @@
 ---
 name: landing-prs
-description: Use when a change is finished and needs to reach a default branch, or when asked to open/raise/create a PR, push and PR, watch/monitor/keep an eye on CI, wait for CI or reviewer/bot comments, check or deal with PR comments, fix review findings, merge (or "merge once green"), check whether a PR merged or anything was missed, ship/land it, or sweep outstanding PRs. Also use before pushing to main/master/develop for any reason.
+description: Use when a change is finished and needs to reach a default branch, or when asked to open/raise/create a PR, push and PR, watch/monitor/keep an eye on CI, wait for CI or reviewer/bot comments, check or deal with PR comments, fix review findings, merge (or "merge once green"), check whether a PR merged or anything was missed, ship/land it, or sweep outstanding PRs. Also use before pushing to main/master or a staging branch for any reason.
 ---
 
 # Landing PRs
@@ -15,21 +15,28 @@ standards, follow those gates as well.
 
 ## The lifecycle
 
-1. **Branch.** Never commit on `main`/`master`/`develop`. If you are on one,
+1. **Branch.** Never commit on `main`/`master`, nor on the staging names
+   `staging`/`dev`/`develop`/`development`. If you are on one,
    `git checkout -b fix/<slug>` (or `feat/`) before committing. Direct pushes
-   to a default branch are forbidden even when they would succeed.
+   to a default or staging branch are forbidden even when they would succeed.
 2. **Open.** Push the branch; `gh pr create --repo OWNER/NAME` against the
-   repo's integration branch (`develop` where the repo has a staging flow,
-   else the default branch). Body: *Why / Root cause or design / What changed / Verification*,
+   repo's integration branch. When the default branch has a source-branch
+   rule, open against the first of `staging`, `dev`, `develop`,
+   `development` that exists on the remote; otherwise open against
+   `main`/`master` from `defaultBranchRef`. Establish that rule from the
+   repository's `git-rules` custom property, classic branch protection, and
+   required status checks — not from `rules/branches` alone. A missing,
+   null, or empty `git-rules` value is not a policy. Body: *Why / Root cause or design / What changed / Verification*,
    honest about what was not verified. When the agent is finished, the pull
    request must be ready for review. Never leave a completed pull request as
    draft. Use `--draft` only while work is still in progress. Changes that
    touch auth, payments, migrations, infra, or secrets may start as draft,
    and must be marked ready when the agent finishes so reviewers can see them.
-   Run `gh pr ready <PR> --repo OWNER/NAME` (or create without `--draft`).
-   After `gh pr ready <PR> --repo OWNER/NAME`, go back to step 3. Workflows and
-   reviewer bots that skipped the draft may still be starting, and the digest
-   from before the pull request was marked ready does not count.
+   Run `gh pr ready <PR> --repo OWNER/NAME` (never a bare `gh pr ready`; or
+   create without `--draft`). After `gh pr ready <PR> --repo OWNER/NAME`, go
+   back to step 3. Workflows and reviewer bots that skipped the draft may
+   still be starting, and the digest from before the pull request was marked
+   ready does not count.
 3. **Wait.** Run `pr-wait.sh <PR> --repo OWNER/NAME` from this skill's directory
    (see `--help`). Pass that same PR and `--repo` on every later `gh` command.
    It returns only when every check run on the head commit is terminal, and
@@ -73,16 +80,26 @@ standards, follow those gates as well.
    (rebase where the repo prefers it; use a merge commit only where the
    repository allows one). `<HEAD>` is the `head=` value on the latest pr-wait
    SUMMARY, and that SUMMARY must be from after the pull request was ready
-   for review. If the head has changed since that digest, the merge refuses;
-   go back to step 3 and wait on the new head. Do not merge a commit the
-   digest did not cover. Read `merge_state` from that same SUMMARY. If it is
-   `BEHIND` (the base moved since the checks ran), `gh pr update-branch <PR> --repo OWNER/NAME`
+   for review. Merge only from a post-ready SUMMARY; if you marked the pull
+   request ready after a wait, re-run wait and triage before merging. If the
+   head has changed since that digest, the merge refuses; go back to step 3
+   and wait on the new head. Do not merge a commit the digest did not cover.
+   Read `merge_state` from that same SUMMARY. If it is `BEHIND` (the base
+   moved since the checks ran), `gh pr update-branch <PR> --repo OWNER/NAME`
    and go back to step 3. Checks must pass on the head that merges. `BLOCKED`
    means a rule you cannot satisfy from here: report it. `UNKNOWN`, or any
    other state you do not recognize, is not settled: do not merge on it.
    Never `--admin` past a refusal.
 6. **Deploy** if the repo's `AGENTS.md` names a post-merge step (for example
    `git pull` on a server with an editable install). Then report.
+
+## Wake-ups
+
+While watching a pull request, reply only when something changed: a new
+commit, a check that failed or recovered, a new unresolved review thread,
+a merge, a close, a conflict, or the wait becoming stuck. Do not send a
+message for an echo, a re-review with no new findings, or CI that is still
+running with nothing new to report.
 
 ## When the user explicitly orders a direct push
 

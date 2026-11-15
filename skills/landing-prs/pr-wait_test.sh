@@ -19,6 +19,7 @@ ok() {
 
 envelope() {
   local checks="$1" threads="$2" checks_more="$3" checks_cursor="$4" threads_more="$5" threads_cursor="$6"
+  local head_ref="${7:-present}"
   jq -cn \
     --argjson checks "$checks" \
     --argjson threads "$threads" \
@@ -26,6 +27,7 @@ envelope() {
     --arg checks_cursor "$checks_cursor" \
     --argjson threads_more "$threads_more" \
     --arg threads_cursor "$threads_cursor" \
+    --arg head_ref "$head_ref" \
     '{
       data: {
         rateLimit: {remaining: 4000, resetAt: "2099-01-01T00:00:00Z", cost: 1},
@@ -39,10 +41,15 @@ envelope() {
             headRefOid: "abc123",
             headRefName: "feature",
             baseRefName: "main",
-            commits: {nodes: [{commit: {oid: "abc123", statusCheckRollup: {contexts: {
-              pageInfo: {hasNextPage: $checks_more, endCursor: (if $checks_cursor == "" then null else $checks_cursor end)},
-              nodes: $checks
-            }}}}]},
+            headRef: (if $head_ref == "null" then null else {
+              target: {
+                oid: "abc123",
+                statusCheckRollup: {contexts: {
+                  pageInfo: {hasNextPage: $checks_more, endCursor: (if $checks_cursor == "" then null else $checks_cursor end)},
+                  nodes: $checks
+                }}
+              }
+            } end),
             reviews: {pageInfo: {hasNextPage: false, endCursor: null}, nodes: []},
             reviewThreads: {pageInfo: {
               hasNextPage: $threads_more,
@@ -53,6 +60,24 @@ envelope() {
         }
       }
     }'
+}
+
+head_object() {
+  local checks="$1"
+  jq -cn --argjson checks "$checks" '{
+    data: {
+      rateLimit: {remaining: 4000, resetAt: "2099-01-01T00:00:00Z", cost: 1},
+      repository: {
+        object: {
+          oid: "abc123",
+          statusCheckRollup: {contexts: {
+            pageInfo: {hasNextPage: false, endCursor: null},
+            nodes: $checks
+          }}
+        }
+      }
+    }
+  }'
 }
 
 check_run() {
@@ -88,15 +113,33 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
   printf '%s\n' '{"number":4}'
   exit 0
 fi
+# GitHub rejects Workflow.path — keep this guard so a later edit cannot look green.
+if printf '%s' "$*" | grep -qE 'workflow[[:space:]]*\{[^}]*\bpath\b'; then
+  printf '%s\n' '{"errors":[{"message":"Field path does not exist on type Workflow"}]}'
+  exit 1
+fi
 if [[ "$*" == *"node(id:"* ]]; then
   cat "$MOCK_FIXTURE/thread-comments-page.json"
+  exit 0
+fi
+mode="${MOCK_MODE:?}"
+if [[ "$mode" == "gh-fail" ]]; then
+  echo "simulated gh failure" >&2
+  exit 1
+fi
+# Head-commit object fallback (deleted headRef).
+if [[ "$*" == *"object(oid:"* ]]; then
+  case "$mode" in
+    deleted-head) cat "$MOCK_FIXTURE/deleted-head-object.json" ;;
+    deleted-head-missing) printf '%s\n' '{"data":{"rateLimit":{"remaining":4000,"resetAt":"2099-01-01T00:00:00Z","cost":1},"repository":{"object":null}}}' ;;
+    *) echo "unexpected object query for mode $mode" >&2; exit 1 ;;
+  esac
   exit 0
 fi
 if [[ "$*" != *"pullRequest"* ]]; then
   printf '%s\n' '{"data":{"rateLimit":{"remaining":4000,"resetAt":"2099-01-01T00:00:00Z"}}}'
   exit 0
 fi
-mode="${MOCK_MODE:?}"
 page=1
 if [[ "$*" == *"contextsAfter="* && "$*" != *"contextsAfter=null"* ]]; then
   page=2
@@ -120,12 +163,14 @@ case "$mode:$page" in
   workflows:1) cat "$MOCK_FIXTURE/workflows.json" ;;
   same-name:1) cat "$MOCK_FIXTURE/same-name.json" ;;
   same-id:1) cat "$MOCK_FIXTURE/same-id.json" ;;
-  paths:1) cat "$MOCK_FIXTURE/paths.json" ;;
+  name-group:1) cat "$MOCK_FIXTURE/name-group.json" ;;
   apps:1) cat "$MOCK_FIXTURE/apps.json" ;;
   mismatch:1) cat "$MOCK_FIXTURE/mismatch.json" ;;
   thread-comments:1) cat "$MOCK_FIXTURE/thread-comments.json" ;;
   thread-cursor:1) cat "$MOCK_FIXTURE/thread-cursor.json" ;;
   large-reviews:1) cat "$MOCK_FIXTURE/large-reviews.json" ;;
+  deleted-head:1) cat "$MOCK_FIXTURE/deleted-head.json" ;;
+  deleted-head-missing:1) cat "$MOCK_FIXTURE/deleted-head.json" ;;
   *) echo "unexpected mock mode $mode page $page" >&2; exit 1 ;;
 esac
 EOF
@@ -331,13 +376,13 @@ log="$TMP/same-id"
 MOCK_MODE=same-id run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "same workflow id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
-# 14d. workflow path separates files when the API omits the database id
-path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" .github/workflows/ci.yml)"
-path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" .github/workflows/lint.yml)"
-envelope "[$path_fail,$path_ok]" '[]' false "" false "" >"$FIX/paths.json"
-log="$TMP/paths"
-MOCK_MODE=paths run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "workflow paths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+# 14d. without a workflow database id, display name is the group (no Workflow.path)
+name_fail="$(check_run 1 test COMPLETED FAILURE CI)"
+name_ok="$(check_run 2 test COMPLETED SUCCESS CI)"
+envelope "[$name_fail,$name_ok]" '[]' false "" false "" >"$FIX/name-group.json"
+log="$TMP/name-group"
+MOCK_MODE=name-group run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "workflow name groups without path" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
 # 14e. non-Actions checks of the same name stay apart by app slug
 app_fail="$(check_run 1 scan COMPLETED FAILURE "" "" semgrep)"
@@ -430,10 +475,10 @@ doc = {
       "headRefOid": "abc123",
       "headRefName": "feature",
       "baseRefName": "main",
-      "commits": {"nodes": [{"commit": {"oid": "abc123", "statusCheckRollup": {"contexts": {
+      "headRef": {"target": {"oid": "abc123", "statusCheckRollup": {"contexts": {
         "pageInfo": {"hasNextPage": False, "endCursor": None},
         "nodes": [early],
-      }}}}]} ,
+      }}}},
       "reviews": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": reviews},
       "reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
       "comments": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []},
@@ -452,6 +497,60 @@ if [ "$code" -eq 0 ] && [ "$count" -eq 80 ]; then
 else
   fail "large review page exit=$code count=$count"
   tail -n 20 "$log.err" >&2
+fi
+
+# 18. deleted headRef still loads checks via object(oid:) — not commits(last:1)
+envelope '[]' '[]' false "" false "" null >"$FIX/deleted-head.json"
+head_object "[$early]" >"$FIX/deleted-head-object.json"
+log="$TMP/deleted-head"
+MOCK_MODE=deleted-head run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "deleted head uses object lookup" "$log.out" $? 0 "head=abc123 .* checks_failed=0"
+if grep -qE 'commits\(last:1\)[[:space:]]*\{' "$log"; then
+  fail "deleted head still queried commits(last:1)"
+elif ! grep -q 'object(oid:' "$log"; then
+  fail "deleted head did not query object(oid:)"
+  sed 's/^/  /' "$log" >&2
+else
+  ok "deleted head queried object(oid:)"
+fi
+
+# 19. missing head commit object is not the empty-check grace path
+log="$TMP/deleted-head-missing"
+MOCK_MODE=deleted-head-missing run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 2 ] && grep -q "no commit object" "$log.err" && ! grep -q "nothing to wait for" "$log.out"; then
+  ok "deleted head missing object is unsettled"
+else
+  fail "deleted head missing exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 20. a failed gh call exits 3 (not empty-as-no-checks)
+log="$TMP/gh-fail"
+MOCK_MODE=gh-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 3 ] && grep -q "failed 3 times" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+  ok "failed gh exits 3"
+else
+  fail "failed gh exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 21. pr-wait.sh must not select Workflow.path (review-thread path is fine)
+if grep -qE 'workflow[[:space:]]*\{[^}]*\bpath\b' "$SCRIPT"; then
+  fail "pr-wait.sh still selects Workflow.path"
+else
+  ok "pr-wait.sh does not select Workflow.path"
+fi
+if grep -qE 'commits\(last:1\)[[:space:]]*\{' "$SCRIPT"; then
+  fail "pr-wait.sh still selects commits(last:1)"
+else
+  ok "pr-wait.sh does not select commits(last:1)"
+fi
+if ! grep -q 'reviewThreads' "$SCRIPT" || ! grep -qE '^[[:space:]]*path$' "$SCRIPT"; then
+  fail "pr-wait.sh dropped review-thread path"
+else
+  ok "pr-wait.sh keeps review-thread path"
 fi
 
 # Permission wording is part of the offline suite. The helper tests above stay
