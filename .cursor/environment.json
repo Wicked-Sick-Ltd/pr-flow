@@ -1,0 +1,4 @@
+{
+  "name": "pr-flow",
+  "install": "bash .cursor/install.sh"
+}
