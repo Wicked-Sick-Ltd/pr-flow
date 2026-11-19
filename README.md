@@ -2,7 +2,7 @@
 
 Open a GitHub pull request, wait until CI and reviewer bots finish, answer every finding, and merge only when the user has authorized it and the digest is clean.
 
-**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Current release: **1.1.0**.
+**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Merge bookkeeping lives in [merge-attribution](skills/merge-attribution/SKILL.md) (who merged what, under which rule) and [tests-ci-only-self-merge](skills/tests-ci-only-self-merge/SKILL.md) (a narrow standing permission, only where the owner recorded it). Current release: **1.1.0**.
 
 This repository is the source of truth. Marketplace copies, including `Wicked-Sick-Ltd/ai-marketplace`, vendor from here. See [VENDORED.md](VENDORED.md).
 

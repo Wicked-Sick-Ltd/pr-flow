@@ -81,6 +81,10 @@ standards, follow those gates as well.
    means a rule you cannot satisfy from here: report it. `UNKNOWN`, or any
    other state you do not recognize, is not settled: do not merge on it.
    Never `--admin` past a refusal.
+   Every merge an agent makes follows the `merge-attribution` skill (a PR
+   comment naming the agent and the rule, plus a daily merge-log line). Where
+   the owner has recorded standing permission for tests/CI-only changes, see
+   `tests-ci-only-self-merge`; that skill never widens what the owner granted.
 6. **Deploy** if the repo's `AGENTS.md` names a post-merge step (for example
    `git pull` on a server with an editable install). Then report.
 
