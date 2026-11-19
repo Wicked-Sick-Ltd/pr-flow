@@ -4,6 +4,7 @@
 
 ### Added
 
+- `merge-attribution` and `tests-ci-only-self-merge` skills. Every agent merge leaves a PR comment naming the agent and rule plus a daily merge-log line. Tests/CI-only self-merge is a narrow standing permission that applies only where the owner recorded it, and never overrides the `landing-prs` authorization rule. `landing-prs` step 5 points to both. Approved by the owner on 19 Nov 2026. Plugin release remains 1.1.0.
 - Marketplace-facing README, CONTRIBUTING.md, SECURITY.md, and a GitHub Actions run of `skills/landing-prs/pr-wait_test.sh`. Docs and repository hygiene only. The plugin release remains 1.1.0.
 
 ### Changed
