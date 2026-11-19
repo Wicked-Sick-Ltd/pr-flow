@@ -25,6 +25,13 @@ fails or is unclear, leave the pull request for the owner.
   dependencies used at runtime.
 - Touch deploy or release workflows, environment files, secrets, tokens,
   `permissions:` blocks, branch protection, CODEOWNERS, or runners.
+- Add or change any `uses:` action or version pin, `on:` trigger (especially
+  `pull_request_target`, `workflow_run` or `schedule`), `secrets.*` or
+  `GITHUB_TOKEN` reference, `env:` that exposes credentials, download or
+  network step, or any job that runs with secrets or write access. Workflow
+  edits are limited to the arguments and selection of existing test, lint or
+  scan commands in jobs that already run without secrets. Anything else is for
+  the owner, because workflow steps execute later with the job's credentials.
 - Remove, skip or weaken a required check, test or security scan (no
   `continue-on-error`, `if: false`, deleted tests or loosened thresholds),
   unless the pull request replaces it with an equal or stronger check.
