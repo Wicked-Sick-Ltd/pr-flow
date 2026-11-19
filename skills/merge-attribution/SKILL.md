@@ -11,8 +11,12 @@ decides whether the merge is authorized.
 
 ## On every merge
 
-1. Just before or right after merging, post one comment on the pull request:
+1. Once the merge is confirmed (`gh pr view <PR> --repo OWNER/NAME --json state,mergeCommit`
+   shows `MERGED` with a merge commit), post one comment on the pull request:
    `Merged by <agent name> under <rule name> (<where and when the rule was granted>). CI: green. Unresolved threads: none.`
+   Never post it before the merge is confirmed. A refused merge (for example
+   `--match-head-commit` rejecting a moved head) or auto-merge that is only
+   enabled is not a merge, so no comment and no log line yet.
    Name the actual rule, for example "low-blast-radius self-merge",
    "tests/CI-only self-merge", "staging branch", or "explicit go from the owner,
    <date and time>".

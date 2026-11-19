@@ -33,7 +33,10 @@ fails or is unclear, leave the pull request for the owner.
 
 - All required checks are green and there are no unresolved review threads,
   per the `landing-prs` digest on the exact head being merged.
-- The repository's one-agent-per-repo rule, or a declared fan-out, is respected.
+- Any rule the repository or organisation sets for concurrent agents (for
+  example an agents file or shipping standards that limit work to one agent per
+  repository, or declare a fan-out) is respected. If you cannot tell, leave it
+  for the owner.
 - Repositories the owner excludes stay excluded even for tests/CI-only pull
   requests. Typical exclusions: auth or SSO, payments, infrastructure or DNS,
   sensitive-data repositories, client repositories, and any repository on an
