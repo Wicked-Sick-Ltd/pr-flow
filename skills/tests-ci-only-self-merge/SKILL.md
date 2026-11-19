@@ -11,6 +11,15 @@ authorization). An agent may merge its own pull request on a live repository
 without waiting for the owner only when every check below passes. If any check
 fails or is unclear, leave the pull request for the owner.
 
+## This adds to `landing-prs`, never replaces it
+
+Every `landing-prs` gate still applies: the clean digest on the exact head
+(`--match-head-commit`), a draft is marked ready and re-waited first, and
+`--admin` is never used. Critical-tier repositories and sensitive changes need
+an explicit owner go regardless of this skill, and where `landing-prs` allows
+less than this skill, `landing-prs` wins. The permission here only removes the
+wait for the owner on changes that pass every check below.
+
 ## The diff must touch only
 
 - Test files and test fixtures (for example `tests/`, `__tests__/`, `*.test.*`,
@@ -45,7 +54,7 @@ fails or is unclear, leave the pull request for the owner.
   repository, or declare a fan-out) is respected. If you cannot tell, leave it
   for the owner.
 - Repositories the owner excludes stay excluded even for tests/CI-only pull
-  requests. Typical exclusions: auth or SSO, payments, infrastructure or DNS,
+  requests. Typical exclusions: Critical-tier repositories, auth or SSO, payments, infrastructure or DNS,
   sensitive-data repositories, client repositories, and any repository on an
   explicit hold.
 
