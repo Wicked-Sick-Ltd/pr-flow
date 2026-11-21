@@ -16,3 +16,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: pr-wait regression tests
         run: bash skills/landing-prs/pr-wait_test.sh
+      - name: cloud agent install checks
+        run: bash .cursor/install_test.sh
