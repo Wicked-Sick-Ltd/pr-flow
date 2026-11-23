@@ -57,13 +57,13 @@ envelope() {
 
 check_run() {
   jq -cn --argjson id "$1" --arg name "$2" --arg status "$3" --arg conclusion "$4" \
-    --arg workflow "${5:-}" --arg wf_id "${6:-}" --arg app "${7:-}" --arg path "${8:-}" \
+    --arg workflow "${5:-}" --arg wf_id "${6:-}" --arg app "${7:-}" --arg resource_path "${8:-}" \
     '{__typename:"CheckRun", databaseId:$id, name:$name, status:$status, conclusion:(if $conclusion == "" then null else $conclusion end), title:"",
       checkSuite:{
         app:(if $app == "" then null else {name:$app, slug:$app, databaseId:null} end),
-        workflowRun:(if ($workflow == "" and $wf_id == "" and $path == "") then null else {workflow:{
+        workflowRun:(if ($workflow == "" and $wf_id == "" and $resource_path == "") then null else {workflow:{
           name:(if $workflow == "" then null else $workflow end),
-          path:(if $path == "" then null else $path end),
+          resourcePath:(if $resource_path == "" then null else $resource_path end),
           databaseId:(if $wf_id == "" then null else ($wf_id | tonumber) end)
         }} end)
       }}'
@@ -331,13 +331,25 @@ log="$TMP/same-id"
 MOCK_MODE=same-id run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "same workflow id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
-# 14d. workflow path separates files when the API omits the database id
-path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" .github/workflows/ci.yml)"
-path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" .github/workflows/lint.yml)"
+# 14d. resourcePath separates workflow files when the API omits the database id.
+# The fixture matches the current Workflow selection: databaseId, name,
+# resourcePath. It does not include the removed path field.
+path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" /acme/widgets/actions/workflows/ci.yml)"
+path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" /acme/widgets/actions/workflows/lint.yml)"
 envelope "[$path_fail,$path_ok]" '[]' false "" false "" >"$FIX/paths.json"
+if jq -e '
+  [.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]
+    | .checkSuite.workflowRun.workflow
+    | select(has("path") or (has("resourcePath") | not) or ((.resourcePath // "") == ""))
+  ] | length == 0
+' "$FIX/paths.json" >/dev/null; then
+  ok "paths fixture uses resourcePath and omits Workflow.path"
+else
+  fail "paths fixture uses resourcePath and omits Workflow.path"
+fi
 log="$TMP/paths"
 MOCK_MODE=paths run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "workflow paths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+assert_summary "workflow resourcePaths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 14e. non-Actions checks of the same name stay apart by app slug
 app_fail="$(check_run 1 scan COMPLETED FAILURE "" "" semgrep)"
@@ -489,6 +501,12 @@ forbid "$ROOT_DIR/SECURITY.md" "This repository is private." "SECURITY.md does n
 forbid "$ROOT_DIR/SECURITY.md" "that form accepts reports" "SECURITY.md does not claim the GitHub form is already open"
 require_text "$ROOT_DIR/SECURITY.md" "hello@wickedsick.com" "SECURITY.md keeps the email channel"
 require_text "$ROOT_DIR/SECURITY.md" "does not claim that form is enabled" "SECURITY.md keeps the form conditional"
+require_text "$SCRIPT" "workflow { databaseId name resourcePath }" "poll query selects Workflow.resourcePath"
+if grep -E 'workflow \{[^}]*\bpath\b' "$SCRIPT" >/dev/null; then
+  fail "poll query still selects Workflow.path"
+else
+  ok "poll query does not select Workflow.path"
+fi
 
 echo
 echo "$PASS passed, $FAIL failed"

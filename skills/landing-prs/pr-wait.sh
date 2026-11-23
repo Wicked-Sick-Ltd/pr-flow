@@ -180,7 +180,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
-                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId path name } } }
+                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId name resourcePath } } }
                   }
                   ... on StatusContext {
                     context
@@ -257,8 +257,8 @@ def lc: ascii_downcase;
             group: (
               if .checkSuite.workflowRun.workflow.databaseId != null then
                 "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
-              elif (.checkSuite.workflowRun.workflow.path // "") != "" then
-                "path:" + .checkSuite.workflowRun.workflow.path
+              elif (.checkSuite.workflowRun.workflow.resourcePath // "") != "" then
+                "path:" + .checkSuite.workflowRun.workflow.resourcePath
               elif .checkSuite.app.databaseId != null then
                 "app:" + (.checkSuite.app.databaseId | tostring)
               elif (.checkSuite.app.slug // "") != "" then
@@ -421,9 +421,11 @@ cursor_or_die() {
 }
 
 # Check runs are deduped only within the same name and stable identity.
-# Identity is the workflow database id, else its path, else the app database
-# id or slug. The workflow display name is only a fallback when the API
-# omitted those, because two workflow files can share a name. A later success
+# Identity is the workflow database id, else its resourcePath, else the app
+# database id or slug. Workflow.path no longer exists on the GitHub GraphQL
+# schema; resourcePath is the field that still identifies that workflow.
+# The display name is only a fallback when the API omitted those, because
+# two workflow files can share a name. A later success
 # drops an older cancelled run of that same check. Commit statuses are never
 # folded into a check run, even when the context string matches the check
 # name. A completed conclusion other than success, neutral or skipped is a

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `pr-wait.sh` no longer selects `path` on the GraphQL `Workflow` type. GitHub removed that field, and the poll failed with `Field 'path' doesn't exist on type 'Workflow'`. Check identity is still the workflow database id, else `resourcePath`, else the app id or slug. The workflow display name stays the fallback when those are missing.
+
 ### Added
 
 - `merge-attribution` and `tests-ci-only-self-merge` skills. Every agent merge leaves a PR comment naming the agent and rule plus a daily merge-log line. Tests/CI-only self-merge is a narrow standing permission that applies only where the owner recorded it, and never overrides the `landing-prs` authorization rule or gates (Critical-tier repositories stay excluded; drafts, fresh digest and no `--admin` still apply). `landing-prs` step 5 points to both. Approved by the owner on 19 Nov 2026. Plugin release remains 1.1.0.
