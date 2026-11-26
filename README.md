@@ -64,10 +64,10 @@ On Windows, use Git Bash or WSL with those tools on `PATH`. Resolve `pr-wait.sh`
 Fetch the helper from this repository: `Wicked-Sick-Ltd/pr-flow`, path `skills/landing-prs/pr-wait.sh`. The old location `Wicked-Sick-Ltd/ai-grok-repo` `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404.
 
 ```bash
-(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh
+dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"
 ```
 
-`pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
+Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
 
 ## Cloud agent environment
 

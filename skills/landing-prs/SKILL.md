@@ -131,10 +131,10 @@ Fetch it from that repository. The old path
 returns 404.
 
 ```bash
-(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh
+dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"
 ```
 
-`pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
+Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
 
 ## Agent runtime
 

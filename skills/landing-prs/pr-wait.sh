@@ -241,7 +241,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
-                    checkSuite { app { name slug databaseId } workflowRun { workflow { databaseId name resourcePath } } }
+                    checkSuite { databaseId app { name slug databaseId } workflowRun { workflow { databaseId name resourcePath } } }
                   }
                   ... on StatusContext {
                     context
@@ -324,6 +324,8 @@ def lc: ascii_downcase;
                 "app:" + (.checkSuite.app.databaseId | tostring)
               elif (.checkSuite.app.slug // "") != "" then
                 "app:" + .checkSuite.app.slug
+              elif .checkSuite.databaseId != null then
+                "suite:" + (.checkSuite.databaseId | tostring)
               elif (.checkSuite.workflowRun.workflow.name // "") != "" then
                 "name:" + .checkSuite.workflowRun.workflow.name
               elif (.checkSuite.app.name // "") != "" then
@@ -483,11 +485,13 @@ cursor_or_die() {
 
 # Check runs are deduped only within the same name and stable identity.
 # Identity is the workflow database id, else its resourcePath, else the app
-# database id or slug. Workflow.path no longer exists on the GitHub GraphQL
-# schema; resourcePath is the field that still identifies that workflow.
-# The display name is only a fallback when the API omitted those, because
-# two workflow files can share a name. A later success
-# drops an older cancelled run of that same check. Commit statuses are never
+# database id or slug, else the check suite id. Workflow.path no longer
+# exists on the GitHub GraphQL schema; resourcePath is the field that still
+# identifies that workflow. The display name is only a fallback when the API
+# omitted those, because two workflow files can share a name. An empty group
+# is not an identity: a later success does not hide another check of the same
+# name. A later success drops an older cancelled run of that same check.
+# Commit statuses are never
 # folded into a check run, even when the context string matches the check
 # name. A completed conclusion other than success, neutral or skipped is a
 # failure (including stale).
@@ -499,6 +503,7 @@ count_failed() {
       | map(
           sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
           | if ($runs | length) < 2 then $runs
+            elif (($runs[0].group // "") == "") then $runs
             else
               ($runs[-1]) as $latest
               | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then

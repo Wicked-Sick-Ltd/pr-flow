@@ -130,6 +130,9 @@ case "$mode:$page" in
     cat "$MOCK_FIXTURE/app-forbidden.json"
     exit 1
     ;;
+  empty-group:1) cat "$MOCK_FIXTURE/empty-group.json" ;;
+  suite-same:1) cat "$MOCK_FIXTURE/suite-same.json" ;;
+  suite-split:1) cat "$MOCK_FIXTURE/suite-split.json" ;;
   other-error:1)
     echo "Field 'something' doesn't exist on type 'Workflow'" >&2
     cat "$MOCK_FIXTURE/other-error.json"
@@ -228,10 +231,11 @@ log="$TMP/blank"
 MOCK_MODE=blank run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "blank conclusion" "$log.out" $? 1 "checks_failed=1"
 
-# 4. a later success drops the cancelled predecessor of the same name
+# 4. same name with no workflow, app, or suite id is not one check.
+# A later success must not hide the cancelled run.
 log="$TMP/cancel"
 MOCK_MODE=cancelled-success run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "cancelled then success" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+assert_summary "unidentified cancelled stays a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 5. a failure on page 2 is visible
 log="$TMP/pages"
@@ -561,7 +565,32 @@ else
   sed 's/^/  /' "$log.out" "$log.err" >&2
 fi
 
-fetch_cmd='(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh'
+# 19. Two checks with the same name and no identity must not hide a failure.
+# An empty group is not a shared rerun key.
+mask_fail="$(check_run 1 scan COMPLETED FAILURE)"
+mask_ok="$(check_run 2 scan COMPLETED SUCCESS)"
+envelope "[$mask_fail,$mask_ok]" '[]' false "" false "" >"$FIX/empty-group.json"
+log="$TMP/empty-group"
+MOCK_MODE=empty-group run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "empty group does not mask a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 20. A check suite id still groups a rerun when the app lookup is missing,
+# and a different suite id keeps a same-named failure.
+suite_cancel="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 10 scan COMPLETED CANCELLED)")"
+suite_ok="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 11 scan COMPLETED SUCCESS)")"
+envelope "[$suite_cancel,$suite_ok]" '[]' false "" false "" >"$FIX/suite-same.json"
+log="$TMP/suite-same"
+MOCK_MODE=suite-same run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "same suite id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+suite_other="$(jq -c '.checkSuite.databaseId = 60 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 2 scan COMPLETED SUCCESS)")"
+suite_bad="$(jq -c '.checkSuite.databaseId = 70 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 1 scan COMPLETED FAILURE)")"
+envelope "[$suite_bad,$suite_other]" '[]' false "" false "" >"$FIX/suite-split.json"
+log="$TMP/suite-split"
+MOCK_MODE=suite-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "suite ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+fetch_cmd='dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"'
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
