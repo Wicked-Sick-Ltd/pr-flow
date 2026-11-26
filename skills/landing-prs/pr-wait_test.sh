@@ -81,6 +81,10 @@ setup_bin() {
 #!/usr/bin/env bash
 echo "gh:$*" >>"${MOCK_LOG:?}"
 if [[ "$1" == "pr" && "$2" == "view" ]]; then
+  if [[ "${MOCK_VIEW_DOWN:-0}" == 1 ]]; then
+    echo "HTTP 502" >&2
+    exit 1
+  fi
   if [[ "$3" == "--repo" || "$3" == "-R" ]]; then
     echo "argument required when using the --repo flag" >&2
     exit 1
@@ -89,10 +93,18 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
   exit 0
 fi
 if [[ "$*" == *"node(id:"* ]]; then
+  if [[ "${MOCK_THREAD_DOWN:-0}" == 1 ]]; then
+    echo "HTTP 502" >&2
+    exit 1
+  fi
   cat "$MOCK_FIXTURE/thread-comments-page.json"
   exit 0
 fi
 if [[ "$*" != *"pullRequest"* ]]; then
+  if [[ "${MOCK_RATE_DOWN:-0}" == 1 ]]; then
+    echo "HTTP 502" >&2
+    exit 1
+  fi
   printf '%s\n' '{"data":{"rateLimit":{"remaining":4000,"resetAt":"2099-01-01T00:00:00Z"}}}'
   exit 0
 fi
@@ -133,6 +145,23 @@ case "$mode:$page" in
   empty-group:1) cat "$MOCK_FIXTURE/empty-group.json" ;;
   suite-same:1) cat "$MOCK_FIXTURE/suite-same.json" ;;
   suite-split:1) cat "$MOCK_FIXTURE/suite-split.json" ;;
+  poll-down:*)
+    echo "HTTP 502" >&2
+    exit 1
+    ;;
+  head-flip:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
+  head-flip:2) cat "$MOCK_FIXTURE/head-flip-page2.json" ;;
+  suite-rerun-fail:1) cat "$MOCK_FIXTURE/suite-rerun-fail.json" ;;
+  suite-matrix:1) cat "$MOCK_FIXTURE/suite-matrix.json" ;;
+  forbid-p2-ok:1|forbid-p2-bad:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
+  forbid-p2-ok:2)
+    cat "$MOCK_FIXTURE/app-forbidden-p2.json"
+    exit 1
+    ;;
+  forbid-p2-bad:2)
+    cat "$MOCK_FIXTURE/other-error-p2.json"
+    exit 1
+    ;;
   other-error:1)
     echo "Field 'something' doesn't exist on type 'Workflow'" >&2
     cat "$MOCK_FIXTURE/other-error.json"
@@ -152,6 +181,36 @@ echo "unexpected git $*" >&2
 exit 1
 EOF
   chmod 755 "$dir/gh" "$dir/git"
+}
+
+# A fake clock: sleep N advances date +%s by N and logs "sleep:N", so wait-loop
+# paths (interval, settle, timeout) run instantly and deterministically.
+setup_clock_bin() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat >"$dir/sleep" <<'EOF'
+#!/usr/bin/env bash
+echo "sleep:$1" >>"${MOCK_LOG:?}"
+now="$(cat "${MOCK_CLOCK:?}")"
+echo $((now + ${1%.*})) >"$MOCK_CLOCK"
+EOF
+  cat >"$dir/date" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "+%s" ]]; then
+  cat "${MOCK_CLOCK:?}"
+  exit 0
+fi
+exec /bin/date "$@"
+EOF
+  chmod 755 "$dir/sleep" "$dir/date"
+}
+
+run_wait_clock() {
+  local log="$1"
+  shift
+  echo 1000 >"$log.clock"
+  MOCK_LOG="$log" MOCK_CLOCK="$log.clock" PATH="$CLOCK_BIN:$BIN:/usr/bin:/bin" PR_WAIT_RETRY_SLEEP=0 \
+    bash "$SCRIPT" "$@" >"$log.out" 2>"$log.err"
 }
 
 run_wait() {
@@ -182,6 +241,8 @@ BIN="$TMP/bin"
 FIX="$TMP/fix"
 mkdir -p "$FIX"
 setup_bin "$BIN"
+CLOCK_BIN="$TMP/clock"
+setup_clock_bin "$CLOCK_BIN"
 export MOCK_FIXTURE="$FIX"
 
 early="$(check_run 1 early COMPLETED SUCCESS)"
@@ -251,17 +312,20 @@ assert_summary "paginated threads" "$log.out" $? 0 "checks_total=1 checks_pendin
 log="$TMP/cursor"
 MOCK_MODE=missing-cursor run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 code=$?
-if [ "$code" -eq 3 ] && grep -q "no endCursor" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+polls="$(grep -c 'pullRequest' "$log" || true)"
+if [ "$code" -eq 3 ] && grep -q "no endCursor" "$log.err" && ! grep -q "^SUMMARY " "$log.out" \
+  && [ "$polls" -eq 1 ] && ! grep -q "after 50 pages" "$log.err"; then
   ok "truncated page fails closed"
 else
   fail "truncated page exit=$code"
   sed 's/^/  /' "$log.out" "$log.err" >&2
 fi
 
-# 8. timeout during settle still emits the digest
+# 8. timeout during settle still emits the digest, but is not green: a
+# reviewer bot can still register inside the settle window, so exit 2.
 log="$TMP/settle"
 MOCK_MODE=settle run_wait "$log" 4 --repo acme/widgets --timeout 0 --settle 10000 --interval 60 --grace 10000
-assert_summary "timeout during settle" "$log.out" $? 0 "checks_failed=0"
+assert_summary "timeout during settle is exit 2" "$log.out" $? 2 "checks_failed=0"
 if ! grep -q "emitting the digest" "$log.out"; then
   fail "timeout during settle did not say it was emitting the digest"
 fi
@@ -336,13 +400,14 @@ log="$TMP/same-name"
 MOCK_MODE=same-name run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "workflow ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
-# 14c. the same workflow id still drops a cancelled predecessor of a later success
+# 14c. the same workflow id is not proof of a rerun: two matrix jobs (or two
+# pushes) share it. Without a shared check suite the cancelled run stays.
 rerun_cancel="$(check_run 10 test COMPLETED CANCELLED CI 100)"
 rerun_ok="$(check_run 11 test COMPLETED SUCCESS CI 100)"
 envelope "[$rerun_cancel,$rerun_ok]" '[]' false "" false "" >"$FIX/same-id.json"
 log="$TMP/same-id"
 MOCK_MODE=same-id run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "same workflow id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+assert_summary "same workflow id without a suite keeps the failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 14d. resourcePath separates workflow files when the API omits the database id.
 # The fixture matches the current Workflow selection: databaseId, name,
@@ -590,15 +655,106 @@ log="$TMP/suite-split"
 MOCK_MODE=suite-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "suite ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
+# 21. Same workflow, same name, different check suites: a later success in
+# another suite does not hide this suite's failure.
+matrix_fail="$(jq -c '.checkSuite.databaseId = 80' <<<"$(check_run 1 test COMPLETED FAILURE CI 100)")"
+matrix_ok="$(jq -c '.checkSuite.databaseId = 81' <<<"$(check_run 2 test COMPLETED SUCCESS CI 100)")"
+envelope "[$matrix_fail,$matrix_ok]" '[]' false "" false "" >"$FIX/suite-matrix.json"
+log="$TMP/suite-matrix"
+MOCK_MODE=suite-matrix run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "same workflow in two suites keeps the failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 22. Within one suite the newest run is the result only if it passed: an
+# older success never hides a newer failure.
+rerun_old_ok="$(jq -c '.checkSuite.databaseId = 90' <<<"$(check_run 1 test COMPLETED SUCCESS CI 100)")"
+rerun_new_bad="$(jq -c '.checkSuite.databaseId = 90' <<<"$(check_run 2 test COMPLETED FAILURE CI 100)")"
+envelope "[$rerun_old_ok,$rerun_new_bad]" '[]' false "" false "" >"$FIX/suite-rerun-fail.json"
+log="$TMP/suite-rerun-fail"
+MOCK_MODE=suite-rerun-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "newer failure in a suite is not hidden" "$log.out" $? 1 "checks_failed=1"
+
+# 23. A die inside $(gh_try ...) must stop the script with that message, not
+# fall through to a parse of empty output.
+expect_down() {
+  local name="$1" log="$2" want="$3" leak="$4" code="$5"
+  if [ "$code" -eq 3 ] && grep -q "$want" "$log.err" && ! grep -q -E "$leak" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+    ok "$name"
+  else
+    fail "$name exit=$code"
+    sed 's/^/  /' "$log.out" "$log.err" >&2
+  fi
+}
+log="$TMP/rate-down"
+MOCK_MODE=passing MOCK_RATE_DOWN=1 run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+expect_down "rate limit down stops" "$log" "rate limit failed 3 times" "missing remaining|missing resetAt" $?
+log="$TMP/poll-down"
+MOCK_MODE=poll-down run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+expect_down "poll down stops" "$log" "poll failed 3 times" "poll returned no pull request|could not parse" $?
+log="$TMP/view-down"
+MOCK_MODE=passing MOCK_VIEW_DOWN=1 run_wait "$log" feature --repo acme/widgets --no-wait --interval 60
+expect_down "pr view down stops" "$log" "pr view failed 3 times" "could not resolve" $?
+log="$TMP/thread-down"
+MOCK_MODE=thread-comments MOCK_THREAD_DOWN=1 run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+expect_down "thread comments down stops" "$log" "thread comments failed 3 times" "returned no thread|could not read" $?
+
+# 24. A head mismatch with every listed check complete reports that it is
+# waiting for the head, never a settle count from an unset clock.
+log="$TMP/mismatch-wait"
+MOCK_MODE=mismatch run_wait_clock "$log" 4 --repo acme/widgets --timeout 100 --settle 0 --interval 60 --grace 10000
+code=$?
+if [ "$code" -eq 2 ] && grep -q "waiting for checks on head newsha" "$log.out" && ! grep -q "settling" "$log.out"; then
+  ok "mismatch status line does not use an unset settle clock"
+else
+  fail "mismatch status line exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 25. A head that moves while paging waits one interval before retrying and
+# still honours --timeout; --no-wait gives up after three attempts.
+jq '.data.repository.pullRequest.headRefOid = "def456"' "$FIX/checks-page2.json" >"$FIX/head-flip-page2.json"
+log="$TMP/head-flip"
+MOCK_MODE=head-flip run_wait_clock "$log" 4 --repo acme/widgets --timeout 100 --interval 60 --grace 10000
+code=$?
+sleeps="$(grep -c '^sleep:60$' "$log" || true)"
+if [ "$code" -eq 2 ] && [ "$sleeps" -ge 1 ] && grep -q "head kept changing" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+  ok "head change while paging waits the interval and times out"
+else
+  fail "head change while paging exit=$code sleeps=$sleeps"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+log="$TMP/head-flip-nowait"
+MOCK_MODE=head-flip run_wait_clock "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+polls="$(grep -c 'pullRequest' "$log" || true)"
+if [ "$code" -eq 2 ] && [ "$polls" -eq 6 ] && grep -q "3 attempts" "$log.err"; then
+  ok "no-wait head change gives up after three attempts"
+else
+  fail "no-wait head change exit=$code polls=$polls"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 26. The Bugbot FORBIDDEN on a later page is tolerated and the page-1 check is
+# kept once; an unrelated FORBIDDEN on a later page still fails closed.
+envelope "[$bugbot]" '[]' false "c2" false "" \
+  | jq --argjson err "$app_forbidden_error" '.errors = [$err]' >"$FIX/app-forbidden-p2.json"
+envelope "[$bugbot]" '[]' false "c2" false "" \
+  | jq --argjson err "$other_error" '.errors = [$err]' >"$FIX/other-error-p2.json"
+log="$TMP/forbid-p2-ok"
+MOCK_MODE=forbid-p2-ok run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "page-2 app FORBIDDEN continues" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+log="$TMP/forbid-p2-bad"
+MOCK_MODE=forbid-p2-bad run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+expect_down "page-2 other FORBIDDEN fails closed" "$log" "poll failed 3 times" "poll returned no pull request|could not parse" $?
+
 fetch_cmd='(set -o pipefail; gh api --method GET -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want"'
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Do not download" "landing-prs does not fetch over the sibling helper"
-require_text "$ROOT_DIR/plugin.json" '"version": "1.1.1"' "plugin.json matches the helper revision"
-require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.1"' "cursor plugin.json matches"
-require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.1"' "claude plugin.json matches"
-require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.1"' "codex plugin.json matches"
+require_text "$ROOT_DIR/plugin.json" '"version": "1.1.2"' "plugin.json matches the helper revision"
+require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.2"' "cursor plugin.json matches"
+require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.2"' "claude plugin.json matches"
+require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.2"' "codex plugin.json matches"
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Wicked-Sick-Ltd/ai-grok-repo" "landing-prs names the old path"
 require_text "$ROOT_DIR/README.md" "returns 404" "README says the old path returns 404"
 

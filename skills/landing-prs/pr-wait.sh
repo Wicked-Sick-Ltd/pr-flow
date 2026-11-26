@@ -41,7 +41,8 @@
 # Exit codes:
 #   0 every listed check is terminal and passed/neutral/skipped
 #   1 a check failed, was cancelled or timed out
-#   2 gave up waiting (timeout), or the snapshot still has pending checks
+#   2 gave up waiting (timeout, including a timeout inside the settle
+#     window), or the snapshot still has pending checks
 #   3 usage, or gh kept failing (never reported as green)
 #   --no-wait prints one snapshot and returns immediately. Exit 0 still
 #   requires every listed check to be terminal. Pending checks exit 2
@@ -315,23 +316,7 @@ def lc: ascii_downcase;
             kind: "check",
             name: (.name // "check"),
             workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
-            group: (
-              if .checkSuite.workflowRun.workflow.databaseId != null then
-                "workflow:" + (.checkSuite.workflowRun.workflow.databaseId | tostring)
-              elif (.checkSuite.workflowRun.workflow.resourcePath // "") != "" then
-                "path:" + .checkSuite.workflowRun.workflow.resourcePath
-              elif .checkSuite.app.databaseId != null then
-                "app:" + (.checkSuite.app.databaseId | tostring)
-              elif (.checkSuite.app.slug // "") != "" then
-                "app:" + .checkSuite.app.slug
-              elif .checkSuite.databaseId != null then
-                "suite:" + (.checkSuite.databaseId | tostring)
-              elif (.checkSuite.workflowRun.workflow.name // "") != "" then
-                "name:" + .checkSuite.workflowRun.workflow.name
-              elif (.checkSuite.app.name // "") != "" then
-                "name:" + .checkSuite.app.name
-              else "" end
-            ),
+            suite: (if .checkSuite.databaseId == null then null else (.checkSuite.databaseId | tostring) end),
             status: ((.status // "PENDING") | lc),
             conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
             output: {title: (.title // "")}
@@ -430,7 +415,7 @@ note_rate_limit() {
 
 read_rate_limit() {
   local raw
-  raw="$(gh_try "rate limit" api graphql -f query='query { rateLimit { remaining resetAt } }')"
+  raw="$(gh_try "rate limit" api graphql -f query='query { rateLimit { remaining resetAt } }')" || exit 3
   if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
     die "rate limit query failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
   fi
@@ -483,27 +468,25 @@ cursor_or_die() {
   fi
 }
 
-# Check runs are deduped only within the same name and stable identity.
-# Identity is the workflow database id, else its resourcePath, else the app
-# database id or slug, else the check suite id. Workflow.path no longer
-# exists on the GitHub GraphQL schema; resourcePath is the field that still
-# identifies that workflow. The display name is only a fallback when the API
-# omitted those, because two workflow files can share a name. An empty group
-# is not an identity: a later success does not hide another check of the same
-# name. A later success drops an older cancelled run of that same check.
-# Commit statuses are never
-# folded into a check run, even when the context string matches the check
-# name. A completed conclusion other than success, neutral or skipped is a
-# failure (including stale).
+# Check runs are deduped only within the same name and the same check suite.
+# A rerun of a job is a new check run in the same check suite, so within one
+# suite the newest run of a name is the result, but only when that newest run
+# passed. Runs in different suites (two workflow files, two apps, two pushes)
+# are never folded together, even when the workflow or app matches, and a run
+# with no suite id is never folded into anything: a later success cannot mask
+# an earlier failure unless the suite proves it is a rerun of the same job.
+# Commit statuses are never folded into a check run, even when the context
+# string matches the check name. A completed conclusion other than success,
+# neutral or skipped is a failure (including stale).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
     def newest_passing_only:
-      group_by([.name, (.group // "")])
+      group_by([.name, (.suite // "")])
       | map(
           sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
           | if ($runs | length) < 2 then $runs
-            elif (($runs[0].group // "") == "") then $runs
+            elif (($runs[0].suite // "") == "") then $runs
             else
               ($runs[-1]) as $latest
               | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
@@ -573,7 +556,7 @@ page_thread_comments() {
         die "review thread comments are truncated and have no endCursor; refusing a partial digest"
       fi
       guard_rate_limit
-      raw="$(gh_try "thread comments" api graphql -f query="$THREAD_COMMENT_QUERY" -f id="$id" -f after="$cursor")"
+      raw="$(gh_try "thread comments" api graphql -f query="$THREAD_COMMENT_QUERY" -f id="$id" -f after="$cursor")" || exit 3
       if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
         die "thread comments failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
       fi
@@ -639,7 +622,7 @@ if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
       die "no pull request given and the current branch could not be resolved; pass a PR number, URL, or branch"
     fi
   fi
-  meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)"
+  meta="$(gh_try "pr view" pr view "$PR" --repo "$REPO" --json number)" || exit 3
   if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$meta"; then
     die "pr view failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$meta")"
   fi
@@ -671,6 +654,8 @@ start=$(now)
 last_sha=""
 stable_since=""
 sig_prev=""
+settle_timed_out=0
+paging_retries=0
 
 # Page every connection to completion. Returns 10 if the head moves mid-page
 # so the caller can retry. Globals checks/reviews/threads/comments/sha/… are
@@ -704,7 +689,7 @@ fetch_snapshot() {
     if [ -n "$reviews_after" ]; then args+=(-f reviewsAfter="$reviews_after"); else args+=(-F reviewsAfter=null); fi
     if [ -n "$threads_after" ]; then args+=(-f threadsAfter="$threads_after"); else args+=(-F threadsAfter=null); fi
     if [ -n "$comments_after" ]; then args+=(-f commentsAfter="$comments_after"); else args+=(-F commentsAfter=null); fi
-    raw="$(gh_try_poll "poll" "${args[@]}")"
+    raw="$(gh_try_poll "poll" "${args[@]}")" || exit 3
     if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
       die "poll failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
     fi
@@ -748,13 +733,13 @@ fetch_snapshot() {
     more_m="$(jq -r '.comments_more' <<<"$parsed")"
     # Hold the last cursor after a connection is exhausted so the next page of
     # a sibling connection does not request page 1 again and duplicate rows.
-    cur="$(cursor_or_die "$more_c" "$(jq -r '.checks_cursor // empty' <<<"$parsed")" checks)"
+    cur="$(cursor_or_die "$more_c" "$(jq -r '.checks_cursor // empty' <<<"$parsed")" checks)" || exit 3
     [ -n "$cur" ] && contexts_after="$cur"
-    cur="$(cursor_or_die "$more_r" "$(jq -r '.reviews_cursor // empty' <<<"$parsed")" reviews)"
+    cur="$(cursor_or_die "$more_r" "$(jq -r '.reviews_cursor // empty' <<<"$parsed")" reviews)" || exit 3
     [ -n "$cur" ] && reviews_after="$cur"
-    cur="$(cursor_or_die "$more_t" "$(jq -r '.threads_cursor // empty' <<<"$parsed")" "review threads")"
+    cur="$(cursor_or_die "$more_t" "$(jq -r '.threads_cursor // empty' <<<"$parsed")" "review threads")" || exit 3
     [ -n "$cur" ] && threads_after="$cur"
-    cur="$(cursor_or_die "$more_m" "$(jq -r '.comments_cursor // empty' <<<"$parsed")" comments)"
+    cur="$(cursor_or_die "$more_m" "$(jq -r '.comments_cursor // empty' <<<"$parsed")" comments)" || exit 3
     [ -n "$cur" ] && comments_after="$cur"
     if [ "$more_c" != true ] && [ "$more_r" != true ] && [ "$more_t" != true ] && [ "$more_m" != true ]; then
       break
@@ -782,8 +767,23 @@ while :; do
   fetch_snapshot
   fetch_rc=$?
   if [ "$fetch_rc" -eq 10 ]; then
+    # The head moved mid-snapshot. Retrying at once could loop on a busy
+    # branch without ever reaching the timeout or the poll interval, so the
+    # retry waits one interval and is bounded by --timeout (or by three
+    # attempts for --no-wait).
+    paging_retries=$((paging_retries + 1))
+    if [ "$NOWAIT" -eq 1 ] && [ "$paging_retries" -ge 3 ]; then
+      echo "pr-wait: head kept changing while paging (${paging_retries} attempts); no snapshot" >&2
+      exit 2
+    fi
+    if [ $(( $(now) - start )) -ge "$TIMEOUT" ]; then
+      echo "pr-wait: timed out after ${TIMEOUT}s while the head kept changing during paging" >&2
+      exit 2
+    fi
+    sleep "$INTERVAL"
     continue
   fi
+  paging_retries=0
   if [ "$fetch_rc" -ne 0 ]; then
     exit "$fetch_rc"
   fi
@@ -823,10 +823,12 @@ while :; do
     echo "pr-wait: no check runs registered after ${GRACE}s — nothing to wait for (verify the repo has CI/bots before treating this as green)"; break
   fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
-    # Settle has not elapsed, but nothing is still running. Emitting the digest
-    # is the truthful result; exit 2 would claim those checks are in progress.
+    # Settle has not elapsed, but nothing listed is still running. Print the
+    # digest so failures are visible, then exit 2: a reviewer bot or a needs:
+    # job can still register inside the settle window, so this is not green.
     if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ] && [ "$head_mismatch" -eq 0 ]; then
-      echo "pr-wait: timed out during settle after ${TIMEOUT}s with all $total check(s) complete; emitting the digest"
+      echo "pr-wait: timed out during settle after ${TIMEOUT}s with all $total check(s) complete; emitting the digest (not settled, exit 2 unless a check failed)"
+      settle_timed_out=1
       break
     fi
     if [ "$head_mismatch" -eq 1 ]; then
@@ -839,6 +841,9 @@ while :; do
   if [ "$pending" -gt 0 ] || [ "$total" -eq 0 ]; then
     names="$(jq -r '[.[] | select(.status != "completed") | .name] | join(", ")' <<<"$checks")"
     echo "pr-wait: ${elapsed}s  waiting on $pending/$total: ${names:-(registering)}"
+  elif [ "$head_mismatch" -eq 1 ] || [ -z "$stable_since" ]; then
+    # stable_since is only set while the listed checks belong to the head.
+    echo "pr-wait: ${elapsed}s  all $total run(s) complete on ${commit_oid:-the checked commit}; waiting for checks on head ${sha}"
   else
     echo "pr-wait: ${elapsed}s  all $total run(s) complete — settling ($((t - stable_since))/${SETTLE}s)"
   fi
@@ -890,6 +895,9 @@ if [ "$failed" -gt 0 ]; then
   exit 1
 fi
 if [ "$pending" -gt 0 ]; then
+  exit 2
+fi
+if [ "$settle_timed_out" -eq 1 ]; then
   exit 2
 fi
 exit 0
