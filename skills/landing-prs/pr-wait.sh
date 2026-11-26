@@ -506,23 +506,28 @@ count_failed() {
     def passing: IN("success", "neutral", "skipped");
     def label_key: ((.labels // []) | map(tostring) | sort | join("\u0001"));
     def newest_passing_only:
-      # Group by workflow run and name first. One sibling with no confirmed
-      # attempt blocks folding for that whole name, including runs whose
-      # labels were filled in. Labels are applied only after that.
-      group_by([(.actions_run // ""), (.name // "")])
+      # Group by name first. A same-named check with no Actions URL, or with
+      # an attempt the jobs API did not confirm, is invisible to a
+      # workflow-run group and must block folding for that whole name.
+      # Labels are applied only after that, and only inside one workflow run.
+      group_by(.name // "")
       | map(
           if any(.[]; (.actions_run // "") == "" or (.attempt | type) != "number") then .
           else
-            group_by(label_key)
+            group_by(.actions_run)
             | map(
-                (group_by(.attempt) | map(length) | max) as $widest
-                | if $widest != 1 then .
-                  else
-                    (sort_by(.attempt)[-1]) as $latest
-                    | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
-                        [$latest]
-                      else . end
-                  end
+                group_by(label_key)
+                | map(
+                    (group_by(.attempt) | map(length) | max) as $widest
+                    | if $widest != 1 then .
+                      else
+                        (sort_by(.attempt)[-1]) as $latest
+                        | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
+                            [$latest]
+                          else . end
+                      end
+                  )
+                | flatten
               )
             | flatten
           end

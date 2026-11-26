@@ -53,8 +53,8 @@ standards, follow those gates as well.
    attempt. The details URL must be this repository's Actions job URL.
    Owner and repository are compared case-insensitively. Any other URL, or
    one run of that name whose attempt the jobs API did not confirm, leaves
-   every run of that name on its own. A passing job does not hide a failing
-   job. A timeout inside the settle window prints the
+   every run of that name on its own, including a same-named check that has
+   no Actions URL. A passing job does not hide a failing job. A timeout inside the settle window prints the
    digest and exits 2, because a reviewer bot can still register. Also require `checks_pending=0`, `checks_failed=0`
    and `unresolved_threads=0`. A `--no-wait` snapshot that still has queued
    or in-progress checks prints the digest and exits 2; that is not clean.

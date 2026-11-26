@@ -182,6 +182,7 @@ case "$mode:$page" in
   label-split:1) cat "$MOCK_FIXTURE/label-split.json" ;;
   partial-lookup:1) cat "$MOCK_FIXTURE/partial-lookup.json" ;;
   single-actions:1) cat "$MOCK_FIXTURE/single-actions.json" ;;
+  unknown-sibling:1) cat "$MOCK_FIXTURE/unknown-sibling.json" ;;
   forbid-p2-ok:1|forbid-p2-bad:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
   forbid-p2-ok:2)
     cat "$MOCK_FIXTURE/app-forbidden-p2.json"
@@ -795,7 +796,19 @@ log="$TMP/partial-lookup"
 MOCK_MODE=partial-lookup run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "partial jobs lookup does not hide a failure" "$log.out" $? 1 "checks_failed=1"
 
-# 33. A name that appears once is not sent to the jobs API.
+# 33. A same-named check with no Actions URL blocks folding for that name.
+# Otherwise the two confirmed attempts would collapse and hide the failure.
+unk_fail="$(actions_check "$(check_run 66 build COMPLETED FAILURE)" 9 66)"
+unk_plain="$(check_run 67 build COMPLETED SUCCESS)"
+unk_new="$(actions_check "$(check_run 68 build COMPLETED SUCCESS)" 9 68)"
+write_job 66 9 1 build '["ubuntu-latest"]'
+write_job 68 9 2 build '["ubuntu-latest"]'
+envelope "[$unk_fail,$unk_plain,$unk_new]" '[]' false "" false "" >"$FIX/unknown-sibling.json"
+log="$TMP/unknown-sibling"
+MOCK_MODE=unknown-sibling run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "unknown-URL sibling blocks folding" "$log.out" $? 1 "checks_failed=1"
+
+# 34. A name that appears once is not sent to the jobs API.
 single="$(actions_check "$(check_run 80 unit COMPLETED SUCCESS)" 9 80)"
 envelope "[$single]" '[]' false "" false "" >"$FIX/single-actions.json"
 log="$TMP/single-actions"
