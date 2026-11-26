@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- `pr-wait.sh` same-name checks are folded by job, not by check suite plus name (release 1.1.3). Two jobs in one workflow run share a check suite, and an explicit `name:` gives them the same check name, so a passing sibling was hiding a failing job. The fold key is the job id from `detailsUrl` (`/job/<id>`) plus the check name. A newer attempt of that same job still replaces an older attempt when the newest run passed. With no job id, the key is the check run id, so a failing run is never folded away by a passing run that only shares a suite and a name. The 1.1.2 settle window, `|| exit 3`, and `stable_since` behaviour are unchanged.
+- `pr-wait.sh` same-name checks are no longer folded by check suite (release 1.1.3). Two jobs in one workflow run share a suite, and an explicit `name:` gives them the same check name, so a passing sibling was hiding a failing job. An Actions `/job/<id>` is one execution, not a stable job id. The helper reads `run_attempt` and `labels` from the Actions jobs API, and only for this repository's `github.com/.../actions/runs/<run>/job/<id>` URL. An older attempt is dropped only when every attempt has exactly one run of that name and those labels and the newest attempt passed. Two jobs in the same attempt, a different host, or a lookup that does not confirm the attempt all stay separate check runs. The 1.1.2 settle window, `|| exit 3`, and `stable_since` behaviour are unchanged.
 
 - `pr-wait.sh` reviewer findings from the 1.1.1 rollout (release 1.1.2):
   - A `--timeout` that fires inside the settle window still prints the digest but exits 2 (1 if a check failed), never 0. A reviewer bot or `needs:` job can still register in that window.

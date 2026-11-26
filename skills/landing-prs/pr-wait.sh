@@ -286,6 +286,26 @@ EOF
 
 PARSE_JQ=$(cat <<'EOF'
 def lc: ascii_downcase;
+# Only this repo's Actions job URL identifies a run. Any other detailsUrl,
+# including another host that happens to end in /job/<digits>, is not a job id.
+def actions_parts:
+  (.detailsUrl // "") as $url
+  | if ($url | type) != "string" or $url == "" then {run: "", job: ""}
+    else
+      ($url | split("?") | (.[0] // "") | split("#") | (.[0] // "") | split("/")) as $p
+      | if (($p | length) == 10 or (($p | length) == 11 and $p[10] == ""))
+      and $p[0] == "https:"
+      and $p[2] == "github.com"
+      and $p[3] == $owner
+      and $p[4] == $repo
+      and $p[5] == "actions"
+      and $p[6] == "runs"
+      and $p[8] == "job"
+      and ($p[7] | test("^[0-9]+$"))
+      and ($p[9] | test("^[0-9]+$"))
+    then {run: $p[7], job: $p[9]}
+    else {run: "", job: ""} end
+    end;
 .data as $root
 | $root.repository.pullRequest as $pr
 | ($pr.commits.nodes[0].commit // null) as $commit
@@ -318,12 +338,8 @@ def lc: ascii_downcase;
             name: (.name // "check"),
             workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
             suite: (if .checkSuite.databaseId == null then null else (.checkSuite.databaseId | tostring) end),
-            job: (
-              (.detailsUrl // "") as $url
-              | if ($url | test("/job/[0-9]+")) then
-                  ($url | sub(".*/job/"; "") | sub("[^0-9].*$"; ""))
-                else "" end
-            ),
+            actions_run: actions_parts.run,
+            actions_job: actions_parts.job,
             status: ((.status // "PENDING") | lc),
             conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
             output: {title: (.title // "")}
@@ -475,37 +491,34 @@ cursor_or_die() {
   fi
 }
 
-# Check runs are deduped by job, not by check suite plus name. Two jobs in
-# one workflow run share a check suite, and an explicit `name:` can make
-# their check runs identical, so a passing sibling must not hide a failure.
-# The job id is the `/job/<id>` segment of detailsUrl when that URL has one.
-# Attempts of the same job share that id: the newest attempt replaces older
-# ones only when that newest attempt passed. With no job id, the key is the
-# check run id, and a run that has neither a numeric check run id nor a job
-# id is never folded into another run. Commit statuses are never folded into
-# a check run, even when the context string matches the check name. A
-# completed conclusion other than success, neutral or skipped is a failure
-# (including stale and cancelled).
+# A check suite is the workflow run, not the job, so suite plus name is not
+# an identity. Actions /job/<id> is one execution: a re-run gets a new id.
+# enrich_attempts records run_attempt and labels from the Actions jobs API
+# for this repo's own actions/runs URL only. An older attempt is dropped
+# only when that metadata shows a single run of this name and these labels
+# in every attempt, and the newest attempt passed. Two jobs that share a
+# name (the same attempt, or an unverified URL) both stay. Anything the
+# jobs API does not confirm stays on its own check run id. Commit statuses
+# are never folded into a check run. A completed conclusion other than
+# success, neutral or skipped is a failure (including stale and cancelled).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
-    def run_key:
-      if ((.job // "") != "") then ["job", (.job | tostring), (.name // "")]
-      elif (.id | type) == "number" then ["run", (.id | tostring)]
-      else ["solo", (._i | tostring)] end;
+    def label_key: ((.labels // []) | map(tostring) | sort | join("\u0001"));
     def newest_passing_only:
-      to_entries
-      | map(.value + {_i: .key})
-      | group_by(run_key)
+      group_by([(.actions_run // ""), (.name // ""), label_key])
       | map(
-          sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
-          | if ($runs | length) < 2 then $runs
-            else
-              ($runs[-1]) as $latest
-              | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
-                  [$latest]
-                else $runs end
-            end
+          if any(.[]; (.actions_run // "") == "" or (.attempt | type) != "number") then .
+          else
+            (group_by(.attempt) | map(length) | max) as $widest
+            | if $widest != 1 then .
+              else
+                (sort_by(.attempt)[-1]) as $latest
+                | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
+                    [$latest]
+                  else . end
+              end
+          end
         )
       | flatten;
     (map(select(.kind == "status")) + (map(select(.kind != "status")) | newest_passing_only))
@@ -515,6 +528,51 @@ count_failed() {
       ))
     | length
   '
+}
+
+# Ask the Actions jobs API which attempt each Actions check belongs to.
+# A miss, a non-numeric id, or a run id that does not match the details URL
+# leaves the check without attempt metadata, so it cannot hide another run.
+enrich_attempts() {
+  local id raw mapf next part
+  mapf="$(mktemp)" || die "mktemp failed"
+  printf '%s' '{}' >"$mapf"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    raw="$(gh api "repos/${owner}/${repo_name}/actions/jobs/${id}" 2>/dev/null || true)"
+    if ! jq -e '.run_attempt | numbers' >/dev/null 2>&1 <<<"${raw:-}"; then
+      continue
+    fi
+    part="$(mktemp)" || die "mktemp failed"
+    next="$(mktemp)" || die "mktemp failed"
+    if ! jq -c --arg id "$id" '{($id): {attempt: .run_attempt, run_id: (.run_id | tostring), labels: ((.labels // []) | map(tostring) | sort)}}' <<<"$raw" >"$part"; then
+      rm -f "$part" "$next"
+      continue
+    fi
+    if ! jq -s '.[0] * .[1]' "$mapf" "$part" >"$next"; then
+      rm -f "$part" "$next"
+      continue
+    fi
+    mv "$next" "$mapf"
+    rm -f "$part"
+  done < <(jq -r '.[] | select((.actions_job // "") != "") | .actions_job' <<<"$checks" | sort -u)
+  next="$(mktemp)" || die "mktemp failed"
+  if ! jq --slurpfile meta "$mapf" '
+    map(
+      . as $c
+      | ($meta[0][$c.actions_job // ""] // null) as $m
+      | if $m == null then .
+        elif ($m.run_id | tostring) != ($c.actions_run | tostring) then .
+        else . + {attempt: $m.attempt, labels: $m.labels}
+        end
+    )
+  ' <<<"$checks" >"$next"; then
+    rm -f "$next" "$mapf"
+    return 0
+  fi
+  checks="$(cat "$next")"
+  rm -f "$next" "$mapf"
 }
 
 # Concatenate two JSON arrays via files. A single --argjson value over 128KiB
@@ -709,7 +767,7 @@ fetch_snapshot() {
     if ! jq -e '.data.repository.pullRequest != null' >/dev/null <<<"$raw"; then
       die "poll returned no pull request ${number} in ${REPO}"
     fi
-    parsed="$(jq -c "$PARSE_JQ" <<<"$raw")" || die "could not parse poll response"
+    parsed="$(jq -c --arg owner "$owner" --arg repo "$repo_name" "$PARSE_JQ" <<<"$raw")" || die "could not parse poll response"
     note_rate_limit "$(jq -r '.remaining // empty' <<<"$parsed")" "$(jq -r '.resetAt // empty' <<<"$parsed")"
 
     page_sha="$(jq -r '.sha // empty' <<<"$parsed")"
@@ -874,6 +932,7 @@ echo
 echo "== CHECKS ($checked)"
 jq -r '.[] | "\(.conclusion // .status)\t\(.name)\t\(.output.title // "")"' <<<"$checks" | sort | column -t -s $'\t' 2>/dev/null \
   || jq -r '.[] | "\(.conclusion // .status)\t\(.name)"' <<<"$checks"
+enrich_attempts
 failed="$(count_failed <<<"$checks")"
 
 echo

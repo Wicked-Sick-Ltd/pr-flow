@@ -74,6 +74,15 @@ thread() {
     '{isResolved:$resolved, isOutdated:false, path:$path, line:1, comments:{nodes:[{author:{login:"reviewer"}, body:"note"}]}}'
 }
 
+actions_check() {
+  jq -c --arg url "https://github.com/acme/widgets/actions/runs/$2/job/$3" '.detailsUrl = $url' <<<"$1"
+}
+
+write_job() {
+  jq -n --argjson id "$1" --argjson run "$2" --argjson attempt "$3" --arg name "$4" --argjson labels "$5" \
+    '{id:$id, run_id:$run, run_attempt:$attempt, name:$name, labels:$labels}' >"$FIX/job-$1.json"
+}
+
 setup_bin() {
   local dir="$1"
   mkdir -p "$dir"
@@ -90,6 +99,17 @@ if [[ "$1" == "pr" && "$2" == "view" ]]; then
     exit 1
   fi
   printf '%s\n' '{"number":4}'
+  exit 0
+fi
+if [[ "$1" == "api" && "$*" == *"/actions/jobs/"* ]]; then
+  job_id="$*"
+  job_id="${job_id##*/actions/jobs/}"
+  job_id="${job_id%%[!0-9]*}"
+  if [[ -n "$job_id" && -f "$MOCK_FIXTURE/job-$job_id.json" ]]; then
+    cat "$MOCK_FIXTURE/job-$job_id.json"
+    exit 0
+  fi
+  printf '%s\n' '{}'
   exit 0
 fi
 if [[ "$*" == *"node(id:"* ]]; then
@@ -157,6 +177,9 @@ case "$mode:$page" in
   job-rerun:1) cat "$MOCK_FIXTURE/job-rerun.json" ;;
   job-rerun-cancel:1) cat "$MOCK_FIXTURE/job-rerun-cancel.json" ;;
   job-rerun-fail:1) cat "$MOCK_FIXTURE/job-rerun-fail.json" ;;
+  foreign-url:1) cat "$MOCK_FIXTURE/foreign-url.json" ;;
+  ambiguous-jobs:1) cat "$MOCK_FIXTURE/ambiguous-jobs.json" ;;
+  label-split:1) cat "$MOCK_FIXTURE/label-split.json" ;;
   forbid-p2-ok:1|forbid-p2-bad:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
   forbid-p2-ok:2)
     cat "$MOCK_FIXTURE/app-forbidden-p2.json"
@@ -678,39 +701,78 @@ log="$TMP/suite-rerun-fail"
 MOCK_MODE=suite-rerun-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "newer failure in a suite is not hidden" "$log.out" $? 1 "checks_failed=1"
 
-# 27. Two jobs in one suite with the same explicit name. The failing job
-# must still fail the digest when the higher-id sibling passed. Job ids
-# match the Actions shape: detailsUrl /job/<id> is that check run's id.
-sib_fail="$(jq -c '.checkSuite.databaseId = 91 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/30"' <<<"$(check_run 30 build COMPLETED FAILURE CI 100)")"
-sib_ok="$(jq -c '.checkSuite.databaseId = 91 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/31"' <<<"$(check_run 31 build COMPLETED SUCCESS CI 100)")"
+# 27. Two jobs in one suite with the same explicit name and the same attempt.
+# The failing job must still fail when the higher-id sibling passed.
+sib_fail="$(actions_check "$(jq -c '.checkSuite.databaseId = 91' <<<"$(check_run 30 build COMPLETED FAILURE CI 100)")" 9 30)"
+sib_ok="$(actions_check "$(jq -c '.checkSuite.databaseId = 91' <<<"$(check_run 31 build COMPLETED SUCCESS CI 100)")" 9 31)"
+write_job 30 9 1 build '["ubuntu-latest"]'
+write_job 31 9 1 build '["ubuntu-latest"]'
 envelope "[$sib_fail,$sib_ok]" '[]' false "" false "" >"$FIX/suite-siblings.json"
 log="$TMP/suite-siblings"
 MOCK_MODE=suite-siblings run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "same-name sibling in one suite stays a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
-# 28. A newer attempt of the same job supersedes an older attempt when the
-# newest run passed. The shared job id is what proves it is one job; the
-# suite is not. A newer failure of that job is still a failure.
-job_old="$(jq -c '.checkSuite.databaseId = 92 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/700"' <<<"$(check_run 40 build COMPLETED FAILURE CI 100)")"
-job_new="$(jq -c '.checkSuite.databaseId = 92 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/700"' <<<"$(check_run 41 build COMPLETED SUCCESS CI 100)")"
+# 28. A newer attempt of the same job supersedes an older one when the jobs
+# API reports one run of that name and those labels per attempt and the
+# newest passed. Each attempt has its own /job/<id>. A newer failure stays.
+job_old="$(actions_check "$(jq -c '.checkSuite.databaseId = 92' <<<"$(check_run 40 build COMPLETED FAILURE CI 100)")" 9 40)"
+job_new="$(actions_check "$(jq -c '.checkSuite.databaseId = 92' <<<"$(check_run 41 build COMPLETED SUCCESS CI 100)")" 9 41)"
+write_job 40 9 1 build '["ubuntu-latest"]'
+write_job 41 9 2 build '["ubuntu-latest"]'
 envelope "[$job_old,$job_new]" '[]' false "" false "" >"$FIX/job-rerun.json"
 log="$TMP/job-rerun"
 MOCK_MODE=job-rerun run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "newer attempt of the same job wins" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
-job_cancel="$(jq -c '.checkSuite.databaseId = 93 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/701"' <<<"$(check_run 42 build COMPLETED CANCELLED CI 100)")"
-job_after="$(jq -c '.checkSuite.databaseId = 93 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/701"' <<<"$(check_run 43 build COMPLETED SUCCESS CI 100)")"
+job_cancel="$(actions_check "$(jq -c '.checkSuite.databaseId = 93' <<<"$(check_run 42 build COMPLETED CANCELLED CI 100)")" 9 42)"
+job_after="$(actions_check "$(jq -c '.checkSuite.databaseId = 93' <<<"$(check_run 43 build COMPLETED SUCCESS CI 100)")" 9 43)"
+write_job 42 9 1 build '["ubuntu-latest"]'
+write_job 43 9 2 build '["ubuntu-latest"]'
 envelope "[$job_cancel,$job_after]" '[]' false "" false "" >"$FIX/job-rerun-cancel.json"
 log="$TMP/job-rerun-cancel"
 MOCK_MODE=job-rerun-cancel run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "newer passing attempt drops the cancelled attempt" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
-job_prev="$(jq -c '.checkSuite.databaseId = 94 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/702"' <<<"$(check_run 44 build COMPLETED SUCCESS CI 100)")"
-job_bad="$(jq -c '.checkSuite.databaseId = 94 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/702"' <<<"$(check_run 45 build COMPLETED FAILURE CI 100)")"
+job_prev="$(actions_check "$(jq -c '.checkSuite.databaseId = 94' <<<"$(check_run 44 build COMPLETED SUCCESS CI 100)")" 9 44)"
+job_bad="$(actions_check "$(jq -c '.checkSuite.databaseId = 94' <<<"$(check_run 45 build COMPLETED FAILURE CI 100)")" 9 45)"
+write_job 44 9 1 build '["ubuntu-latest"]'
+write_job 45 9 2 build '["ubuntu-latest"]'
 envelope "[$job_prev,$job_bad]" '[]' false "" false "" >"$FIX/job-rerun-fail.json"
 log="$TMP/job-rerun-fail"
 MOCK_MODE=job-rerun-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "newer failed attempt of the same job stays a failure" "$log.out" $? 1 "checks_failed=1"
+
+# 29. A /job/<id> on another host is not an Actions job id, so the same digits
+# must not fold two checks together.
+foreign_fail="$(jq -c '.detailsUrl = "https://ci-a.example/job/700"' <<<"$(check_run 70 build COMPLETED FAILURE)")"
+foreign_ok="$(jq -c '.detailsUrl = "https://ci-b.example/job/700"' <<<"$(check_run 71 build COMPLETED SUCCESS)")"
+envelope "[$foreign_fail,$foreign_ok]" '[]' false "" false "" >"$FIX/foreign-url.json"
+log="$TMP/foreign-url"
+MOCK_MODE=foreign-url run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "foreign /job/ URL does not fold a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 30. Two same-name jobs in one attempt stay failed even if a later attempt
+# of that name passed. Different labels are different jobs, so a success on
+# one label does not hide a failure on the other.
+amb_a="$(actions_check "$(check_run 60 build COMPLETED FAILURE)" 9 60)"
+amb_b="$(actions_check "$(check_run 61 build COMPLETED SUCCESS)" 9 61)"
+amb_c="$(actions_check "$(check_run 62 build COMPLETED SUCCESS)" 9 62)"
+write_job 60 9 1 build '["ubuntu-latest"]'
+write_job 61 9 1 build '["ubuntu-latest"]'
+write_job 62 9 2 build '["ubuntu-latest"]'
+envelope "[$amb_a,$amb_b,$amb_c]" '[]' false "" false "" >"$FIX/ambiguous-jobs.json"
+log="$TMP/ambiguous-jobs"
+MOCK_MODE=ambiguous-jobs run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "ambiguous same-name jobs are not superseded" "$log.out" $? 1 "checks_failed=1"
+
+lab_fail="$(actions_check "$(check_run 50 build COMPLETED FAILURE)" 9 50)"
+lab_ok="$(actions_check "$(check_run 51 build COMPLETED SUCCESS)" 9 51)"
+write_job 50 9 1 build '["ubuntu-latest"]'
+write_job 51 9 2 build '["windows-latest"]'
+envelope "[$lab_fail,$lab_ok]" '[]' false "" false "" >"$FIX/label-split.json"
+log="$TMP/label-split"
+MOCK_MODE=label-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "different labels stay separate jobs" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 23. A die inside $(gh_try ...) must stop the script with that message, not
 # fall through to a parse of empty output.
