@@ -180,6 +180,8 @@ case "$mode:$page" in
   foreign-url:1) cat "$MOCK_FIXTURE/foreign-url.json" ;;
   ambiguous-jobs:1) cat "$MOCK_FIXTURE/ambiguous-jobs.json" ;;
   label-split:1) cat "$MOCK_FIXTURE/label-split.json" ;;
+  partial-lookup:1) cat "$MOCK_FIXTURE/partial-lookup.json" ;;
+  single-actions:1) cat "$MOCK_FIXTURE/single-actions.json" ;;
   forbid-p2-ok:1|forbid-p2-bad:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
   forbid-p2-ok:2)
     cat "$MOCK_FIXTURE/app-forbidden-p2.json"
@@ -773,6 +775,37 @@ envelope "[$lab_fail,$lab_ok]" '[]' false "" false "" >"$FIX/label-split.json"
 log="$TMP/label-split"
 MOCK_MODE=label-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "different labels stay separate jobs" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 31. Owner and repo in the Actions URL are case-insensitive, so a re-run
+# still supersedes when --repo spelling differs from the details URL.
+log="$TMP/job-rerun-case"
+MOCK_MODE=job-rerun run_wait "$log" 4 --repo ACME/widgets --no-wait --interval 60
+assert_summary "owner and repo compare case-insensitively" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+# 32. A missing jobs lookup on one same-name sibling blocks folding for the
+# whole name. The other sibling's failure must not disappear behind a later
+# success whose labels happened to be filled in.
+part_fail="$(actions_check "$(check_run 63 build COMPLETED FAILURE)" 9 63)"
+part_gap="$(actions_check "$(check_run 64 build COMPLETED SUCCESS)" 9 64)"
+part_new="$(actions_check "$(check_run 65 build COMPLETED SUCCESS)" 9 65)"
+write_job 63 9 1 build '["ubuntu-latest"]'
+write_job 65 9 2 build '["ubuntu-latest"]'
+envelope "[$part_fail,$part_gap,$part_new]" '[]' false "" false "" >"$FIX/partial-lookup.json"
+log="$TMP/partial-lookup"
+MOCK_MODE=partial-lookup run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "partial jobs lookup does not hide a failure" "$log.out" $? 1 "checks_failed=1"
+
+# 33. A name that appears once is not sent to the jobs API.
+single="$(actions_check "$(check_run 80 unit COMPLETED SUCCESS)" 9 80)"
+envelope "[$single]" '[]' false "" false "" >"$FIX/single-actions.json"
+log="$TMP/single-actions"
+MOCK_MODE=single-actions run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+if [ $? -eq 0 ] && ! grep -q '/actions/jobs/' "$log"; then
+  ok "unique Actions job is not looked up"
+else
+  fail "unique Actions job is not looked up"
+  sed 's/^/  /' "$log" "$log.out" "$log.err" >&2
+fi
 
 # 23. A die inside $(gh_try ...) must stop the script with that message, not
 # fall through to a parse of empty output.

@@ -296,8 +296,8 @@ def actions_parts:
       | if (($p | length) == 10 or (($p | length) == 11 and $p[10] == ""))
       and $p[0] == "https:"
       and $p[2] == "github.com"
-      and $p[3] == $owner
-      and $p[4] == $repo
+      and (($p[3] | ascii_downcase) == ($owner | ascii_downcase))
+      and (($p[4] | ascii_downcase) == ($repo | ascii_downcase))
       and $p[5] == "actions"
       and $p[6] == "runs"
       and $p[8] == "job"
@@ -506,18 +506,25 @@ count_failed() {
     def passing: IN("success", "neutral", "skipped");
     def label_key: ((.labels // []) | map(tostring) | sort | join("\u0001"));
     def newest_passing_only:
-      group_by([(.actions_run // ""), (.name // ""), label_key])
+      # Group by workflow run and name first. One sibling with no confirmed
+      # attempt blocks folding for that whole name, including runs whose
+      # labels were filled in. Labels are applied only after that.
+      group_by([(.actions_run // ""), (.name // "")])
       | map(
           if any(.[]; (.actions_run // "") == "" or (.attempt | type) != "number") then .
           else
-            (group_by(.attempt) | map(length) | max) as $widest
-            | if $widest != 1 then .
-              else
-                (sort_by(.attempt)[-1]) as $latest
-                | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
-                    [$latest]
-                  else . end
-              end
+            group_by(label_key)
+            | map(
+                (group_by(.attempt) | map(length) | max) as $widest
+                | if $widest != 1 then .
+                  else
+                    (sort_by(.attempt)[-1]) as $latest
+                    | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
+                        [$latest]
+                      else . end
+                  end
+              )
+            | flatten
           end
         )
       | flatten;
@@ -556,7 +563,14 @@ enrich_attempts() {
     fi
     mv "$next" "$mapf"
     rm -f "$part"
-  done < <(jq -r '.[] | select((.actions_job // "") != "") | .actions_job' <<<"$checks" | sort -u)
+  # A name that appears once in a workflow run cannot be folded, so it
+  # does not need a jobs lookup. Only duplicate run/name groups are enriched.
+  done < <(jq -r '
+    [ .[] | select((.actions_run // "") != "" and (.actions_job // "") != "") ]
+    | group_by([.actions_run, .name])
+    | map(select(length > 1) | .[].actions_job)
+    | .[]
+  ' <<<"$checks" | sort -u)
   next="$(mktemp)" || die "mktemp failed"
   if ! jq --slurpfile meta "$mapf" '
     map(
