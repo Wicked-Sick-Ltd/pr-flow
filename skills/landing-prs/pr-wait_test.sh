@@ -57,13 +57,13 @@ envelope() {
 
 check_run() {
   jq -cn --argjson id "$1" --arg name "$2" --arg status "$3" --arg conclusion "$4" \
-    --arg workflow "${5:-}" --arg wf_id "${6:-}" --arg app "${7:-}" --arg path "${8:-}" \
+    --arg workflow "${5:-}" --arg wf_id "${6:-}" --arg app "${7:-}" --arg resource_path "${8:-}" \
     '{__typename:"CheckRun", databaseId:$id, name:$name, status:$status, conclusion:(if $conclusion == "" then null else $conclusion end), title:"",
       checkSuite:{
         app:(if $app == "" then null else {name:$app, slug:$app, databaseId:null} end),
-        workflowRun:(if ($workflow == "" and $wf_id == "" and $path == "") then null else {workflow:{
+        workflowRun:(if ($workflow == "" and $wf_id == "" and $resource_path == "") then null else {workflow:{
           name:(if $workflow == "" then null else $workflow end),
-          path:(if $path == "" then null else $path end),
+          resourcePath:(if $resource_path == "" then null else $resource_path end),
           databaseId:(if $wf_id == "" then null else ($wf_id | tonumber) end)
         }} end)
       }}'
@@ -126,6 +126,18 @@ case "$mode:$page" in
   thread-comments:1) cat "$MOCK_FIXTURE/thread-comments.json" ;;
   thread-cursor:1) cat "$MOCK_FIXTURE/thread-cursor.json" ;;
   large-reviews:1) cat "$MOCK_FIXTURE/large-reviews.json" ;;
+  app-forbidden:1)
+    cat "$MOCK_FIXTURE/app-forbidden.json"
+    exit 1
+    ;;
+  empty-group:1) cat "$MOCK_FIXTURE/empty-group.json" ;;
+  suite-same:1) cat "$MOCK_FIXTURE/suite-same.json" ;;
+  suite-split:1) cat "$MOCK_FIXTURE/suite-split.json" ;;
+  other-error:1)
+    echo "Field 'something' doesn't exist on type 'Workflow'" >&2
+    cat "$MOCK_FIXTURE/other-error.json"
+    exit 1
+    ;;
   *) echo "unexpected mock mode $mode page $page" >&2; exit 1 ;;
 esac
 EOF
@@ -219,10 +231,11 @@ log="$TMP/blank"
 MOCK_MODE=blank run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "blank conclusion" "$log.out" $? 1 "checks_failed=1"
 
-# 4. a later success drops the cancelled predecessor of the same name
+# 4. same name with no workflow, app, or suite id is not one check.
+# A later success must not hide the cancelled run.
 log="$TMP/cancel"
 MOCK_MODE=cancelled-success run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "cancelled then success" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+assert_summary "unidentified cancelled stays a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 5. a failure on page 2 is visible
 log="$TMP/pages"
@@ -331,13 +344,25 @@ log="$TMP/same-id"
 MOCK_MODE=same-id run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "same workflow id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
 
-# 14d. workflow path separates files when the API omits the database id
-path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" .github/workflows/ci.yml)"
-path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" .github/workflows/lint.yml)"
+# 14d. resourcePath separates workflow files when the API omits the database id.
+# The fixture matches the current Workflow selection: databaseId, name,
+# resourcePath. It does not include the removed path field.
+path_fail="$(check_run 1 test COMPLETED FAILURE CI "" "" /acme/widgets/actions/workflows/ci.yml)"
+path_ok="$(check_run 2 test COMPLETED SUCCESS CI "" "" /acme/widgets/actions/workflows/lint.yml)"
 envelope "[$path_fail,$path_ok]" '[]' false "" false "" >"$FIX/paths.json"
+if jq -e '
+  [.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]
+    | .checkSuite.workflowRun.workflow
+    | select(has("path") or (has("resourcePath") | not) or ((.resourcePath // "") == ""))
+  ] | length == 0
+' "$FIX/paths.json" >/dev/null; then
+  ok "paths fixture uses resourcePath and omits Workflow.path"
+else
+  fail "paths fixture uses resourcePath and omits Workflow.path"
+fi
 log="$TMP/paths"
 MOCK_MODE=paths run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "workflow paths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+assert_summary "workflow resourcePaths stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 # 14e. non-Actions checks of the same name stay apart by app slug
 app_fail="$(check_run 1 scan COMPLETED FAILURE "" "" semgrep)"
@@ -489,6 +514,93 @@ forbid "$ROOT_DIR/SECURITY.md" "This repository is private." "SECURITY.md does n
 forbid "$ROOT_DIR/SECURITY.md" "that form accepts reports" "SECURITY.md does not claim the GitHub form is already open"
 require_text "$ROOT_DIR/SECURITY.md" "hello@wickedsick.com" "SECURITY.md keeps the email channel"
 require_text "$ROOT_DIR/SECURITY.md" "does not claim that form is enabled" "SECURITY.md keeps the form conditional"
+require_text "$SCRIPT" "workflow { databaseId name resourcePath }" "poll query selects Workflow.resourcePath"
+if grep -E 'workflow \{[^}]*\bpath\b' "$SCRIPT" >/dev/null; then
+  fail "poll query still selects Workflow.path"
+else
+  ok "poll query does not select Workflow.path"
+fi
+
+# 18. Cursor Bugbot's app lookup returns FORBIDDEN because the cursor org has
+# an IP allow list. gh exits 1 and still prints the poll body. That error is
+# an unknown app; the digest continues. A different error still fails.
+bugbot="$(check_run 4 "Cursor Bugbot" COMPLETED SUCCESS)"
+bugbot="$(jq -c '.checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$bugbot")"
+app_forbidden_error="$(jq -cn '{
+  type: "FORBIDDEN",
+  path: ["repository","pullRequest","commits","nodes",0,"commit","statusCheckRollup","contexts","nodes",1,"checkSuite","app"],
+  extensions: {saml_failure: false, ip_allow_list_failure: true},
+  message: "Although you appear to have the correct authorization credentials, the `cursor` organization has an IP allow list enabled, and your IP address is not permitted to access this resource."
+}')"
+envelope "[$early,$bugbot]" '[]' false "" false "" \
+  | jq --argjson err "$app_forbidden_error" '.errors = [$err, $err]' >"$FIX/app-forbidden.json"
+log="$TMP/app-forbidden"
+MOCK_MODE=app-forbidden run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 0 ] \
+  && grep -q "SUMMARY pr=4 head=abc123 .*checks_total=2 checks_pending=0 checks_failed=0" "$log.out" \
+  && grep -q "Cursor Bugbot" "$log.out" \
+  && grep -q "treating app as unknown" "$log.err"; then
+  ok "app lookup IP allow list FORBIDDEN continues"
+else
+  fail "app lookup IP allow list FORBIDDEN exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+other_error="$(jq -cn '{
+  type: "FORBIDDEN",
+  path: ["repository"],
+  extensions: {saml_failure: false, ip_allow_list_failure: true},
+  message: "Although you appear to have the correct authorization credentials, the `cursor` organization has an IP allow list enabled, and your IP address is not permitted to access this resource."
+}')"
+envelope "[$early]" '[]' false "" false "" \
+  | jq --argjson err "$other_error" '.errors = [$err]' >"$FIX/other-error.json"
+log="$TMP/other-error"
+MOCK_MODE=other-error run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 3 ] && grep -q "failed 3 times" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+  ok "other FORBIDDEN still fails the poll"
+else
+  fail "other FORBIDDEN exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+# 19. Two checks with the same name and no identity must not hide a failure.
+# An empty group is not a shared rerun key.
+mask_fail="$(check_run 1 scan COMPLETED FAILURE)"
+mask_ok="$(check_run 2 scan COMPLETED SUCCESS)"
+envelope "[$mask_fail,$mask_ok]" '[]' false "" false "" >"$FIX/empty-group.json"
+log="$TMP/empty-group"
+MOCK_MODE=empty-group run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "empty group does not mask a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 20. A check suite id still groups a rerun when the app lookup is missing,
+# and a different suite id keeps a same-named failure.
+suite_cancel="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 10 scan COMPLETED CANCELLED)")"
+suite_ok="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 11 scan COMPLETED SUCCESS)")"
+envelope "[$suite_cancel,$suite_ok]" '[]' false "" false "" >"$FIX/suite-same.json"
+log="$TMP/suite-same"
+MOCK_MODE=suite-same run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "same suite id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+suite_other="$(jq -c '.checkSuite.databaseId = 60 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 2 scan COMPLETED SUCCESS)")"
+suite_bad="$(jq -c '.checkSuite.databaseId = 70 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 1 scan COMPLETED FAILURE)")"
+envelope "[$suite_bad,$suite_other]" '[]' false "" false "" >"$FIX/suite-split.json"
+log="$TMP/suite-split"
+MOCK_MODE=suite-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "suite ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+fetch_cmd='(set -o pipefail; gh api --method GET -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want"'
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
+require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
+require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Do not download" "landing-prs does not fetch over the sibling helper"
+require_text "$ROOT_DIR/plugin.json" '"version": "1.1.1"' "plugin.json matches the helper revision"
+require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.1"' "cursor plugin.json matches"
+require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.1"' "claude plugin.json matches"
+require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.1"' "codex plugin.json matches"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Wicked-Sick-Ltd/ai-grok-repo" "landing-prs names the old path"
+require_text "$ROOT_DIR/README.md" "returns 404" "README says the old path returns 404"
 
 echo
 echo "$PASS passed, $FAIL failed"

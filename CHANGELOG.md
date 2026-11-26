@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Fixed
+
+- `pr-wait.sh` no longer selects `path` on the GraphQL `Workflow` type. GitHub removed that field, and the poll failed with `Field 'path' doesn't exist on type 'Workflow'`. The query selects `resourcePath` (the equivalent of `path: resourcePath`) and check identity is still the workflow database id, else that resource path, else the app id or slug. The workflow display name stays the fallback when those are missing.
+- `pr-wait.sh` keeps polling when the check-suite app lookup returns only the cursor organization's IP allow list `FORBIDDEN` (`type` `FORBIDDEN`, path ending in `checkSuite` / `app`, `extensions.ip_allow_list_failure`). That error is an unknown app. `gh` exits 1 for it. Any other GraphQL error still fails the poll.
+- `pr-wait.sh` does not let a later success hide a failure when two checks share a name and have no workflow or app identity. An empty group is not treated as one check. When the app lookup is blocked, the check suite id still separates suites, so a rerun in the same suite can still replace a cancelled run.
+
 ### Added
 
 - `merge-attribution` and `tests-ci-only-self-merge` skills. Every agent merge leaves a PR comment naming the agent and rule plus a daily merge-log line. Tests/CI-only self-merge is a narrow standing permission that applies only where the owner recorded it, and never overrides the `landing-prs` authorization rule or gates (Critical-tier repositories stay excluded; drafts, fresh digest and no `--admin` still apply). `landing-prs` step 5 points to both. Approved by the owner on 19 Nov 2026. Plugin release remains 1.1.0.
@@ -10,6 +16,8 @@
 
 ### Changed
 
+- Docs tell readers to fetch `pr-wait.sh` from `Wicked-Sick-Ltd/pr-flow` at `skills/landing-prs/pr-wait.sh`. The old `Wicked-Sick-Ltd/ai-grok-repo` path `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404. Agents run the `pr-wait.sh` beside the loaded skill. A machine that does not already have the skill fetches one pinned revision: `ref="<commit-or-tag>"` `want="<blob sha of pr-wait.sh at that ref>"` `dest="$(mktemp)"` `meta="$(mktemp)"` `(set -o pipefail; gh api --method GET -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want" && jq -r .content < "$meta" | base64 -d > "$dest" && chmod +x "$dest"`. The old `Wicked-Sick-Ltd/ai-grok-repo` path returns 404. `mktemp` avoids the fixed path `/tmp/pr-wait.sh`. `pipefail` keeps a failed download from writing an empty executable. The sha check refuses a blob that is not `want`.
+- Plugin manifests are 1.1.1 (`plugin.json`, `.cursor-plugin`, `.claude-plugin`, `.codex-plugin`). The helper agents execute changed, so the package version moves with that helper.
 - `landing-prs` and `pr` merge only when the installing user has explicitly asked, or has recorded standing permission that covers the change. Installing the plugin is not permission to merge, and neither is a repository label. Unknown merge state, or a sensitive change the request does not cover, does not merge. Finished work is still ready for review, and `--admin` is still refused. The plugin release remains 1.1.0.
 - SECURITY.md no longer describes repository visibility. Email remains the report channel. GitHub's vulnerability form is described as available only after the repository is public and a maintainer has enabled it.
 - Current docs name this repository as the vendor source for marketplace copies.
