@@ -59,6 +59,14 @@ bash skills/landing-prs/pr-wait.sh --dry-run
 
 On Windows, use Git Bash or WSL with those tools on `PATH`. Resolve `pr-wait.sh` from the installed skill folder (`skills/landing-prs/` beside this plugin).
 
+## Fetch pr-wait.sh
+
+Fetch the helper from this repository: `Wicked-Sick-Ltd/pr-flow`, path `skills/landing-prs/pr-wait.sh`. The old location `Wicked-Sick-Ltd/ai-grok-repo` `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404.
+
+```bash
+gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh
+```
+
 ## Cloud agent environment
 
 Cursor Cloud Agents run `bash .cursor/install.sh` from `.cursor/environment.json`. The script is idempotent and does not call GitHub. It installs `gh`, `jq`, Python 3, and `column` (`bsdextrautils`) for the helper and the regression tests, plus `shellcheck`, `shfmt`, and `bats` for shell checks. When `GH_TOKEN` and `GITHUB_TOKEN` are both unset, it prints a warning that names those variables and still exits 0. The regression tests mock `gh` and stay offline.

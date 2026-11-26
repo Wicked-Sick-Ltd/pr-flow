@@ -123,8 +123,19 @@ still needs reviewing. Urgency you inferred yourself is not an order.
 `unresolved_threads>0` in a final report · `gh pr merge --admin` · a finished
 agent's pull request left as draft.
 
+## Fetching pr-wait.sh
+
+The helper is `skills/landing-prs/pr-wait.sh` in `Wicked-Sick-Ltd/pr-flow`.
+Fetch it from that repository. The old path
+`Wicked-Sick-Ltd/ai-grok-repo` `plugins/pr-flow/skills/landing-prs/pr-wait.sh`
+returns 404.
+
+```bash
+gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh
+```
+
 ## Agent runtime
 
-Resolve `pr-wait.sh` beside this `SKILL.md`. Read the repository `AGENTS.md`
-when it names extra gates. Use only tools that are actually connected. Do not
-invent tool names.
+Resolve `pr-wait.sh` beside this `SKILL.md`, or fetch it with the command
+above. Read the repository `AGENTS.md` when it names extra gates. Use only
+tools that are actually connected. Do not invent tool names.

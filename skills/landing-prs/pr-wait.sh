@@ -12,6 +12,10 @@
 # Commit statuses (the older status API) are waited on and counted with the
 # check runs.
 #
+# A GraphQL FORBIDDEN on checkSuite.app, with extensions.ip_allow_list_failure,
+# is the cursor organization's IP allow list blocking the Bugbot app lookup.
+# That error is an unknown app. The poll continues. Any other error fails.
+#
 # Each poll pages GraphQL connections (100 items per page) for check runs,
 # commit statuses, review threads, reviews and issue comments until each
 # connection is complete. A truncated page is not a digest: the script stops
@@ -126,6 +130,26 @@ command -v jq >/dev/null || die "jq not found"
 # gh_try LABEL gh-args... — up to 3 attempts; prints stdout of the first success.
 # A persistent failure is fatal (exit 3): a rate limit or 502 must never be
 # read back as "no checks", "no threads" or "no comments".
+#
+# One exception, and only on the poll: GitHub returns FORBIDDEN for
+# checkSuite.app when the app's organization (cursor, for Bugbot) has an IP
+# allow list. gh exits 1 and the check run is still in the payload with app
+# null. Those errors are an unknown app. Any other error still fails.
+app_lookup_forbidden_only() {
+  jq -e '
+    (.errors // []) as $errs
+    | ($errs | length) > 0
+    and ($errs | all(
+        (.type // "") == "FORBIDDEN"
+        and (.extensions.ip_allow_list_failure == true)
+        and ((.path | type) == "array")
+        and ((.path | length) >= 2)
+        and ((.path[-1] | tostring) == "app")
+        and ((.path[-2] | tostring) == "checkSuite")
+      ))
+  ' >/dev/null 2>&1 <<<"$1"
+}
+
 gh_try() {
   local label="$1"
   shift
@@ -133,6 +157,43 @@ gh_try() {
   err="$(mktemp)" || die "mktemp failed"
   while [ "$attempt" -le 3 ]; do
     if out="$(gh "$@" 2>"$err")"; then
+      rm -f "$err"
+      printf '%s' "$out"
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then
+      sleep "$RETRY_SLEEP"
+    fi
+    attempt=$((attempt + 1))
+  done
+  local msg
+  msg="$(tr '\n' ' ' <"$err" 2>/dev/null || true)"
+  rm -f "$err"
+  die "$label failed 3 times (gh ${cmd} ...): ${msg}"
+}
+
+# Poll variant of gh_try. A payload whose only GraphQL errors are the
+# checkSuite.app IP allow list FORBIDDEN is returned with those errors
+# removed, including when gh exits 1. The app field is already null.
+gh_try_poll() {
+  local label="$1"
+  shift
+  local attempt=1 out err cmd="$1" rc
+  err="$(mktemp)" || die "mktemp failed"
+  while [ "$attempt" -le 3 ]; do
+    out="$(gh "$@" 2>"$err")"
+    rc=$?
+    if app_lookup_forbidden_only "$out"; then
+      echo "pr-wait: checkSuite app lookup returned FORBIDDEN (organization IP allow list); treating app as unknown and continuing" >&2
+      if ! out="$(jq -c 'del(.errors)' <<<"$out")"; then
+        rm -f "$err"
+        die "could not drop app-lookup FORBIDDEN errors from poll"
+      fi
+      rm -f "$err"
+      printf '%s' "$out"
+      return 0
+    fi
+    if [ "$rc" -eq 0 ]; then
       rm -f "$err"
       printf '%s' "$out"
       return 0
@@ -638,7 +699,7 @@ fetch_snapshot() {
     if [ -n "$reviews_after" ]; then args+=(-f reviewsAfter="$reviews_after"); else args+=(-F reviewsAfter=null); fi
     if [ -n "$threads_after" ]; then args+=(-f threadsAfter="$threads_after"); else args+=(-F threadsAfter=null); fi
     if [ -n "$comments_after" ]; then args+=(-f commentsAfter="$comments_after"); else args+=(-F commentsAfter=null); fi
-    raw="$(gh_try "poll" "${args[@]}")"
+    raw="$(gh_try_poll "poll" "${args[@]}")"
     if jq -e '(.errors // []) | length > 0' >/dev/null <<<"$raw"; then
       die "poll failed: $(jq -r '[(.errors // [])[].message] | join("; ")' <<<"$raw")"
     fi

@@ -126,6 +126,15 @@ case "$mode:$page" in
   thread-comments:1) cat "$MOCK_FIXTURE/thread-comments.json" ;;
   thread-cursor:1) cat "$MOCK_FIXTURE/thread-cursor.json" ;;
   large-reviews:1) cat "$MOCK_FIXTURE/large-reviews.json" ;;
+  app-forbidden:1)
+    cat "$MOCK_FIXTURE/app-forbidden.json"
+    exit 1
+    ;;
+  other-error:1)
+    echo "Field 'something' doesn't exist on type 'Workflow'" >&2
+    cat "$MOCK_FIXTURE/other-error.json"
+    exit 1
+    ;;
   *) echo "unexpected mock mode $mode page $page" >&2; exit 1 ;;
 esac
 EOF
@@ -507,6 +516,57 @@ if grep -E 'workflow \{[^}]*\bpath\b' "$SCRIPT" >/dev/null; then
 else
   ok "poll query does not select Workflow.path"
 fi
+
+# 18. Cursor Bugbot's app lookup returns FORBIDDEN because the cursor org has
+# an IP allow list. gh exits 1 and still prints the poll body. That error is
+# an unknown app; the digest continues. A different error still fails.
+bugbot="$(check_run 4 "Cursor Bugbot" COMPLETED SUCCESS)"
+bugbot="$(jq -c '.checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$bugbot")"
+app_forbidden_error="$(jq -cn '{
+  type: "FORBIDDEN",
+  path: ["repository","pullRequest","commits","nodes",0,"commit","statusCheckRollup","contexts","nodes",1,"checkSuite","app"],
+  extensions: {saml_failure: false, ip_allow_list_failure: true},
+  message: "Although you appear to have the correct authorization credentials, the `cursor` organization has an IP allow list enabled, and your IP address is not permitted to access this resource."
+}')"
+envelope "[$early,$bugbot]" '[]' false "" false "" \
+  | jq --argjson err "$app_forbidden_error" '.errors = [$err, $err]' >"$FIX/app-forbidden.json"
+log="$TMP/app-forbidden"
+MOCK_MODE=app-forbidden run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 0 ] \
+  && grep -q "SUMMARY pr=4 head=abc123 .*checks_total=2 checks_pending=0 checks_failed=0" "$log.out" \
+  && grep -q "Cursor Bugbot" "$log.out" \
+  && grep -q "treating app as unknown" "$log.err"; then
+  ok "app lookup IP allow list FORBIDDEN continues"
+else
+  fail "app lookup IP allow list FORBIDDEN exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+other_error="$(jq -cn '{
+  type: "FORBIDDEN",
+  path: ["repository"],
+  extensions: {saml_failure: false, ip_allow_list_failure: true},
+  message: "Although you appear to have the correct authorization credentials, the `cursor` organization has an IP allow list enabled, and your IP address is not permitted to access this resource."
+}')"
+envelope "[$early]" '[]' false "" false "" \
+  | jq --argjson err "$other_error" '.errors = [$err]' >"$FIX/other-error.json"
+log="$TMP/other-error"
+MOCK_MODE=other-error run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+code=$?
+if [ "$code" -eq 3 ] && grep -q "failed 3 times" "$log.err" && ! grep -q "^SUMMARY " "$log.out"; then
+  ok "other FORBIDDEN still fails the poll"
+else
+  fail "other FORBIDDEN exit=$code"
+  sed 's/^/  /' "$log.out" "$log.err" >&2
+fi
+
+fetch_cmd='gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh'
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
+require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
+require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Wicked-Sick-Ltd/ai-grok-repo" "landing-prs names the old path"
+require_text "$ROOT_DIR/README.md" "returns 404" "README says the old path returns 404"
 
 echo
 echo "$PASS passed, $FAIL failed"

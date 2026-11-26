@@ -4,7 +4,8 @@
 
 ### Fixed
 
-- `pr-wait.sh` no longer selects `path` on the GraphQL `Workflow` type. GitHub removed that field, and the poll failed with `Field 'path' doesn't exist on type 'Workflow'`. Check identity is still the workflow database id, else `resourcePath`, else the app id or slug. The workflow display name stays the fallback when those are missing.
+- `pr-wait.sh` no longer selects `path` on the GraphQL `Workflow` type. GitHub removed that field, and the poll failed with `Field 'path' doesn't exist on type 'Workflow'`. The query selects `resourcePath` (the equivalent of `path: resourcePath`) and check identity is still the workflow database id, else that resource path, else the app id or slug. The workflow display name stays the fallback when those are missing.
+- `pr-wait.sh` keeps polling when the check-suite app lookup returns only the cursor organization's IP allow list `FORBIDDEN` (`type` `FORBIDDEN`, path ending in `checkSuite` / `app`, `extensions.ip_allow_list_failure`). That error is an unknown app. `gh` exits 1 for it. Any other GraphQL error still fails the poll.
 
 ### Added
 
@@ -14,6 +15,7 @@
 
 ### Changed
 
+- Docs tell readers to fetch `pr-wait.sh` from `Wicked-Sick-Ltd/pr-flow` at `skills/landing-prs/pr-wait.sh`. The old `Wicked-Sick-Ltd/ai-grok-repo` path `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404. The fetch command is `gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh`.
 - `landing-prs` and `pr` merge only when the installing user has explicitly asked, or has recorded standing permission that covers the change. Installing the plugin is not permission to merge, and neither is a repository label. Unknown merge state, or a sensitive change the request does not cover, does not merge. Finished work is still ready for review, and `--admin` is still refused. The plugin release remains 1.1.0.
 - SECURITY.md no longer describes repository visibility. Email remains the report channel. GitHub's vulnerability form is described as available only after the repository is public and a maintainer has enabled it.
 - Current docs name this repository as the vendor source for marketplace copies.
