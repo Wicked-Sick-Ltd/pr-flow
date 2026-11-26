@@ -141,10 +141,10 @@ ref="<commit-or-tag>"
 want="<blob sha of pr-wait.sh at that ref>"
 dest="$(mktemp)"
 meta="$(mktemp)"
-(set -o pipefail; gh api -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want" && jq -r .content < "$meta" | base64 -d > "$dest" && chmod +x "$dest"
+(set -o pipefail; gh api --method GET -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want" && jq -r .content < "$meta" | base64 -d > "$dest" && chmod +x "$dest"
 ```
 
-Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
+Run `"$dest"`. `--method GET` is required: `gh api` sends a POST when `-f` is present, and the contents API does not return the file for that POST. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
 
 ## Agent runtime
 

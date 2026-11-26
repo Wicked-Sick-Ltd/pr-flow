@@ -590,7 +590,7 @@ log="$TMP/suite-split"
 MOCK_MODE=suite-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "suite ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
-fetch_cmd='(set -o pipefail; gh api -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want"'
+fetch_cmd='(set -o pipefail; gh api --method GET -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want"'
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
