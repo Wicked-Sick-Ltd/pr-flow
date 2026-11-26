@@ -153,6 +153,10 @@ case "$mode:$page" in
   head-flip:2) cat "$MOCK_FIXTURE/head-flip-page2.json" ;;
   suite-rerun-fail:1) cat "$MOCK_FIXTURE/suite-rerun-fail.json" ;;
   suite-matrix:1) cat "$MOCK_FIXTURE/suite-matrix.json" ;;
+  suite-siblings:1) cat "$MOCK_FIXTURE/suite-siblings.json" ;;
+  job-rerun:1) cat "$MOCK_FIXTURE/job-rerun.json" ;;
+  job-rerun-cancel:1) cat "$MOCK_FIXTURE/job-rerun-cancel.json" ;;
+  job-rerun-fail:1) cat "$MOCK_FIXTURE/job-rerun-fail.json" ;;
   forbid-p2-ok:1|forbid-p2-bad:1) cat "$MOCK_FIXTURE/checks-page1.json" ;;
   forbid-p2-ok:2)
     cat "$MOCK_FIXTURE/app-forbidden-p2.json"
@@ -639,14 +643,15 @@ log="$TMP/empty-group"
 MOCK_MODE=empty-group run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "empty group does not mask a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
-# 20. A check suite id still groups a rerun when the app lookup is missing,
-# and a different suite id keeps a same-named failure.
-suite_cancel="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 10 scan COMPLETED CANCELLED)")"
-suite_ok="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 11 scan COMPLETED SUCCESS)")"
+# 20. A shared check suite is not a job. A cancelled run beside a later
+# success of the same name stays a failure when the job ids differ, and a
+# different suite id also keeps a same-named failure.
+suite_cancel="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/10"' <<<"$(check_run 10 scan COMPLETED CANCELLED)")"
+suite_ok="$(jq -c '.checkSuite.databaseId = 50 | .checkSuite.app = null | .checkSuite.workflowRun = null | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/11"' <<<"$(check_run 11 scan COMPLETED SUCCESS)")"
 envelope "[$suite_cancel,$suite_ok]" '[]' false "" false "" >"$FIX/suite-same.json"
 log="$TMP/suite-same"
 MOCK_MODE=suite-same run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
-assert_summary "same suite id drops cancelled" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+assert_summary "same suite does not drop a different job" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
 suite_other="$(jq -c '.checkSuite.databaseId = 60 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 2 scan COMPLETED SUCCESS)")"
 suite_bad="$(jq -c '.checkSuite.databaseId = 70 | .checkSuite.app = null | .checkSuite.workflowRun = null' <<<"$(check_run 1 scan COMPLETED FAILURE)")"
@@ -672,6 +677,40 @@ envelope "[$rerun_old_ok,$rerun_new_bad]" '[]' false "" false "" >"$FIX/suite-re
 log="$TMP/suite-rerun-fail"
 MOCK_MODE=suite-rerun-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "newer failure in a suite is not hidden" "$log.out" $? 1 "checks_failed=1"
+
+# 27. Two jobs in one suite with the same explicit name. The failing job
+# must still fail the digest when the higher-id sibling passed. Job ids
+# match the Actions shape: detailsUrl /job/<id> is that check run's id.
+sib_fail="$(jq -c '.checkSuite.databaseId = 91 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/30"' <<<"$(check_run 30 build COMPLETED FAILURE CI 100)")"
+sib_ok="$(jq -c '.checkSuite.databaseId = 91 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/31"' <<<"$(check_run 31 build COMPLETED SUCCESS CI 100)")"
+envelope "[$sib_fail,$sib_ok]" '[]' false "" false "" >"$FIX/suite-siblings.json"
+log="$TMP/suite-siblings"
+MOCK_MODE=suite-siblings run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "same-name sibling in one suite stays a failure" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
+
+# 28. A newer attempt of the same job supersedes an older attempt when the
+# newest run passed. The shared job id is what proves it is one job; the
+# suite is not. A newer failure of that job is still a failure.
+job_old="$(jq -c '.checkSuite.databaseId = 92 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/700"' <<<"$(check_run 40 build COMPLETED FAILURE CI 100)")"
+job_new="$(jq -c '.checkSuite.databaseId = 92 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/700"' <<<"$(check_run 41 build COMPLETED SUCCESS CI 100)")"
+envelope "[$job_old,$job_new]" '[]' false "" false "" >"$FIX/job-rerun.json"
+log="$TMP/job-rerun"
+MOCK_MODE=job-rerun run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "newer attempt of the same job wins" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+job_cancel="$(jq -c '.checkSuite.databaseId = 93 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/701"' <<<"$(check_run 42 build COMPLETED CANCELLED CI 100)")"
+job_after="$(jq -c '.checkSuite.databaseId = 93 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/701"' <<<"$(check_run 43 build COMPLETED SUCCESS CI 100)")"
+envelope "[$job_cancel,$job_after]" '[]' false "" false "" >"$FIX/job-rerun-cancel.json"
+log="$TMP/job-rerun-cancel"
+MOCK_MODE=job-rerun-cancel run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "newer passing attempt drops the cancelled attempt" "$log.out" $? 0 "checks_total=2 checks_pending=0 checks_failed=0"
+
+job_prev="$(jq -c '.checkSuite.databaseId = 94 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/702"' <<<"$(check_run 44 build COMPLETED SUCCESS CI 100)")"
+job_bad="$(jq -c '.checkSuite.databaseId = 94 | .detailsUrl = "https://github.com/acme/widgets/actions/runs/9/job/702"' <<<"$(check_run 45 build COMPLETED FAILURE CI 100)")"
+envelope "[$job_prev,$job_bad]" '[]' false "" false "" >"$FIX/job-rerun-fail.json"
+log="$TMP/job-rerun-fail"
+MOCK_MODE=job-rerun-fail run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
+assert_summary "newer failed attempt of the same job stays a failure" "$log.out" $? 1 "checks_failed=1"
 
 # 23. A die inside $(gh_try ...) must stop the script with that message, not
 # fall through to a parse of empty output.
@@ -751,10 +790,10 @@ require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs f
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Do not download" "landing-prs does not fetch over the sibling helper"
-require_text "$ROOT_DIR/plugin.json" '"version": "1.1.2"' "plugin.json matches the helper revision"
-require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.2"' "cursor plugin.json matches"
-require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.2"' "claude plugin.json matches"
-require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.2"' "codex plugin.json matches"
+require_text "$ROOT_DIR/plugin.json" '"version": "1.1.3"' "plugin.json matches the helper revision"
+require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.3"' "cursor plugin.json matches"
+require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.3"' "claude plugin.json matches"
+require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.3"' "codex plugin.json matches"
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Wicked-Sick-Ltd/ai-grok-repo" "landing-prs names the old path"
 require_text "$ROOT_DIR/README.md" "returns 404" "README says the old path returns 404"
 

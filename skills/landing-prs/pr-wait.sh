@@ -242,6 +242,7 @@ query($owner:String!, $name:String!, $number:Int!, $contextsAfter:String, $revie
                     status
                     conclusion
                     title
+                    detailsUrl
                     checkSuite { databaseId app { name slug databaseId } workflowRun { workflow { databaseId name resourcePath } } }
                   }
                   ... on StatusContext {
@@ -317,6 +318,12 @@ def lc: ascii_downcase;
             name: (.name // "check"),
             workflow: (.checkSuite.workflowRun.workflow.name // .checkSuite.app.name // ""),
             suite: (if .checkSuite.databaseId == null then null else (.checkSuite.databaseId | tostring) end),
+            job: (
+              (.detailsUrl // "") as $url
+              | if ($url | test("/job/[0-9]+")) then
+                  ($url | sub(".*/job/"; "") | sub("[^0-9].*$"; ""))
+                else "" end
+            ),
             status: ((.status // "PENDING") | lc),
             conclusion: (if .conclusion == null then null else (.conclusion | lc) end),
             output: {title: (.title // "")}
@@ -468,25 +475,31 @@ cursor_or_die() {
   fi
 }
 
-# Check runs are deduped only within the same name and the same check suite.
-# A rerun of a job is a new check run in the same check suite, so within one
-# suite the newest run of a name is the result, but only when that newest run
-# passed. Runs in different suites (two workflow files, two apps, two pushes)
-# are never folded together, even when the workflow or app matches, and a run
-# with no suite id is never folded into anything: a later success cannot mask
-# an earlier failure unless the suite proves it is a rerun of the same job.
-# Commit statuses are never folded into a check run, even when the context
-# string matches the check name. A completed conclusion other than success,
-# neutral or skipped is a failure (including stale).
+# Check runs are deduped by job, not by check suite plus name. Two jobs in
+# one workflow run share a check suite, and an explicit `name:` can make
+# their check runs identical, so a passing sibling must not hide a failure.
+# The job id is the `/job/<id>` segment of detailsUrl when that URL has one.
+# Attempts of the same job share that id: the newest attempt replaces older
+# ones only when that newest attempt passed. With no job id, the key is the
+# check run id, and a run that has neither a numeric check run id nor a job
+# id is never folded into another run. Commit statuses are never folded into
+# a check run, even when the context string matches the check name. A
+# completed conclusion other than success, neutral or skipped is a failure
+# (including stale and cancelled).
 count_failed() {
   jq '
     def passing: IN("success", "neutral", "skipped");
+    def run_key:
+      if ((.job // "") != "") then ["job", (.job | tostring), (.name // "")]
+      elif (.id | type) == "number" then ["run", (.id | tostring)]
+      else ["solo", (._i | tostring)] end;
     def newest_passing_only:
-      group_by([.name, (.suite // "")])
+      to_entries
+      | map(.value + {_i: .key})
+      | group_by(run_key)
       | map(
           sort_by(if (.id | type) == "number" then .id else 0 end) as $runs
           | if ($runs | length) < 2 then $runs
-            elif (($runs[0].suite // "") == "") then $runs
             else
               ($runs[-1]) as $latest
               | if $latest.status == "completed" and (($latest.conclusion // "") | passing) then
