@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- `pr-wait.sh` same-name checks are no longer folded by check suite (release 1.1.3). Two jobs in one workflow run share a suite, and an explicit `name:` gives them the same check name, so a passing sibling was hiding a failing job. An Actions `/job/<id>` is one execution, not a stable job id. The helper reads `run_attempt` and `labels` from the Actions jobs API, and only for this repository's `github.com/.../actions/runs/<run>/job/<id>` URL. An older attempt is dropped only when every attempt has exactly one run of that name and those labels and the newest attempt passed. Owner and repository in that URL are compared case-insensitively. If any run of that name has no Actions URL or no confirmed attempt, none of them are folded. Jobs whose name appears once are not looked up. Two jobs in the same attempt, a different host, or a partial lookup all stay separate check runs. The 1.1.2 settle window, `|| exit 3`, and `stable_since` behaviour are unchanged.
+
 - `pr-wait.sh` reviewer findings from the 1.1.1 rollout (release 1.1.2):
   - A `--timeout` that fires inside the settle window still prints the digest but exits 2 (1 if a check failed), never 0. A reviewer bot or `needs:` job can still register in that window.
   - Every `$(gh_try ...)`, `$(gh_try_poll ...)` and `$(cursor_or_die ...)` is followed by `|| exit 3`. The script runs without `set -e`, so a `die` inside command substitution only ended the subshell; the script then parsed empty output (for example "rate limit response missing remaining", or re-requesting page 1 until the 50-page cap).
@@ -14,7 +16,7 @@
 
 - `pr-wait.sh` no longer selects `path` on the GraphQL `Workflow` type. GitHub removed that field, and the poll failed with `Field 'path' doesn't exist on type 'Workflow'`. The query selects `resourcePath` (the equivalent of `path: resourcePath`) and check identity is still the workflow database id, else that resource path, else the app id or slug. The workflow display name stays the fallback when those are missing.
 - `pr-wait.sh` keeps polling when the check-suite app lookup returns only the cursor organization's IP allow list `FORBIDDEN` (`type` `FORBIDDEN`, path ending in `checkSuite` / `app`, `extensions.ip_allow_list_failure`). That error is an unknown app. `gh` exits 1 for it. Any other GraphQL error still fails the poll.
-- `pr-wait.sh` does not let a later success hide a failure when two checks share a name and have no workflow or app identity. An empty group is not treated as one check. When the app lookup is blocked, the check suite id still separates suites, so a rerun in the same suite can still replace a cancelled run.
+- `pr-wait.sh` does not let a later success hide a failure when two checks share a name and have no workflow or app identity. An empty group is not treated as one check. When the app lookup is blocked, a missing workflow or app is not one shared check.
 
 ### Added
 

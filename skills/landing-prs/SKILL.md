@@ -46,7 +46,15 @@ standards, follow those gates as well.
    The SUMMARY includes `truncated=0` only when paging finished, and `head=`
    is the commit whose checks that digest describes. Exit 0 means every
    listed check on that commit is terminal and passed, and that commit is
-   the pull request head. A timeout inside the settle window prints the
+   the pull request head. Two check runs that share a display name are still
+   two checks. A later success replaces an earlier run only when the Actions
+   jobs API shows they are attempts of one job: the same workflow run, the
+   same name, the same labels, and exactly one run of that job in each
+   attempt. The details URL must be this repository's Actions job URL.
+   Owner and repository are compared case-insensitively. Any other URL, or
+   one run of that name whose attempt the jobs API did not confirm, leaves
+   every run of that name on its own, including a same-named check that has
+   no Actions URL. A passing job does not hide a failing job. A timeout inside the settle window prints the
    digest and exits 2, because a reviewer bot can still register. Also require `checks_pending=0`, `checks_failed=0`
    and `unresolved_threads=0`. A `--no-wait` snapshot that still has queued
    or in-progress checks prints the digest and exits 2; that is not clean.
