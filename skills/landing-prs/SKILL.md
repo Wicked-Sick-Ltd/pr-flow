@@ -131,8 +131,10 @@ Fetch it from that repository. The old path
 returns 404.
 
 ```bash
-gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh
+(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh
 ```
+
+`pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
 
 ## Agent runtime
 

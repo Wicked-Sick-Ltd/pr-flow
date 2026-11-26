@@ -561,7 +561,7 @@ else
   sed 's/^/  /' "$log.out" "$log.err" >&2
 fi
 
-fetch_cmd='gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh'
+fetch_cmd='(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh'
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"

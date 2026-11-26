@@ -15,7 +15,7 @@
 
 ### Changed
 
-- Docs tell readers to fetch `pr-wait.sh` from `Wicked-Sick-Ltd/pr-flow` at `skills/landing-prs/pr-wait.sh`. The old `Wicked-Sick-Ltd/ai-grok-repo` path `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404. The fetch command is `gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh && chmod +x /tmp/pr-wait.sh`.
+- Docs tell readers to fetch `pr-wait.sh` from `Wicked-Sick-Ltd/pr-flow` at `skills/landing-prs/pr-wait.sh`. The old `Wicked-Sick-Ltd/ai-grok-repo` path `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404. The fetch command is `(set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > /tmp/pr-wait.sh) && chmod +x /tmp/pr-wait.sh`. `pipefail` keeps a failed download from writing an empty executable.
 - `landing-prs` and `pr` merge only when the installing user has explicitly asked, or has recorded standing permission that covers the change. Installing the plugin is not permission to merge, and neither is a repository label. Unknown merge state, or a sensitive change the request does not cover, does not merge. Finished work is still ready for review, and `--admin` is still refused. The plugin release remains 1.1.0.
 - SECURITY.md no longer describes repository visibility. Email remains the report channel. GitHub's vulnerability form is described as available only after the repository is public and a maintainer has enabled it.
 - Current docs name this repository as the vendor source for marketplace copies.
