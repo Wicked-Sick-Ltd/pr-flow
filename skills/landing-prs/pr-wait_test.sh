@@ -590,10 +590,15 @@ log="$TMP/suite-split"
 MOCK_MODE=suite-split run_wait "$log" 4 --repo acme/widgets --no-wait --interval 60
 assert_summary "suite ids stay separate" "$log.out" $? 1 "checks_total=2 checks_pending=0 checks_failed=1"
 
-fetch_cmd='dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"'
+fetch_cmd='(set -o pipefail; gh api -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want"'
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "$fetch_cmd" "landing-prs fetch command"
 require_text "$ROOT_DIR/README.md" "$fetch_cmd" "README fetch command"
 require_text "$ROOT_DIR/CHANGELOG.md" "$fetch_cmd" "CHANGELOG fetch command"
+require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Do not download" "landing-prs does not fetch over the sibling helper"
+require_text "$ROOT_DIR/plugin.json" '"version": "1.1.1"' "plugin.json matches the helper revision"
+require_text "$ROOT_DIR/.cursor-plugin/plugin.json" '"version": "1.1.1"' "cursor plugin.json matches"
+require_text "$ROOT_DIR/.claude-plugin/plugin.json" '"version": "1.1.1"' "claude plugin.json matches"
+require_text "$ROOT_DIR/.codex-plugin/plugin.json" '"version": "1.1.1"' "codex plugin.json matches"
 require_text "$ROOT_DIR/skills/landing-prs/SKILL.md" "Wicked-Sick-Ltd/ai-grok-repo" "landing-prs names the old path"
 require_text "$ROOT_DIR/README.md" "returns 404" "README says the old path returns 404"
 

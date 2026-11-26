@@ -2,7 +2,7 @@
 
 Open a GitHub pull request, wait until CI and reviewer bots finish, answer every finding, and merge only when the user has authorized it and the digest is clean.
 
-**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Merge bookkeeping lives in [merge-attribution](skills/merge-attribution/SKILL.md) (who merged what, under which rule) and [tests-ci-only-self-merge](skills/tests-ci-only-self-merge/SKILL.md) (a narrow standing permission, only where the owner recorded it). Current release: **1.1.0**.
+**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Merge bookkeeping lives in [merge-attribution](skills/merge-attribution/SKILL.md) (who merged what, under which rule) and [tests-ci-only-self-merge](skills/tests-ci-only-self-merge/SKILL.md) (a narrow standing permission, only where the owner recorded it). Current release: **1.1.1**.
 
 This repository is the source of truth. Marketplace copies, including `Wicked-Sick-Ltd/ai-marketplace`, vendor from here. See [VENDORED.md](VENDORED.md).
 
@@ -63,11 +63,17 @@ On Windows, use Git Bash or WSL with those tools on `PATH`. Resolve `pr-wait.sh`
 
 Fetch the helper from this repository: `Wicked-Sick-Ltd/pr-flow`, path `skills/landing-prs/pr-wait.sh`. The old location `Wicked-Sick-Ltd/ai-grok-repo` `plugins/pr-flow/skills/landing-prs/pr-wait.sh` returns 404.
 
+Run the `pr-wait.sh` that shipped with the skill. Do not replace that copy with a download. A machine that does not already have the skill can fetch one pinned revision. Set `ref` to the commit or tag, and `want` to the blob sha of `pr-wait.sh` at that ref.
+
 ```bash
-dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"
+ref="<commit-or-tag>"
+want="<blob sha of pr-wait.sh at that ref>"
+dest="$(mktemp)"
+meta="$(mktemp)"
+(set -o pipefail; gh api -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want" && jq -r .content < "$meta" | base64 -d > "$dest" && chmod +x "$dest"
 ```
 
-Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
+Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable. The sha check refuses the file when the blob is not the revision named in `want`.
 
 ## Cloud agent environment
 

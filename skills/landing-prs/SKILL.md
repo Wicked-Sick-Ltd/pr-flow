@@ -125,19 +125,30 @@ agent's pull request left as draft.
 
 ## Fetching pr-wait.sh
 
-The helper is `skills/landing-prs/pr-wait.sh` in `Wicked-Sick-Ltd/pr-flow`.
-Fetch it from that repository. The old path
+Run the `pr-wait.sh` beside this `SKILL.md`. That file is the same revision as
+the skill the agent already loaded. Do not replace it with a download.
+
+The helper's home is `skills/landing-prs/pr-wait.sh` in
+`Wicked-Sick-Ltd/pr-flow`. The old path
 `Wicked-Sick-Ltd/ai-grok-repo` `plugins/pr-flow/skills/landing-prs/pr-wait.sh`
-returns 404.
+returns 404. A machine that does not already have this skill can fetch one
+pinned revision. Set `ref` to the commit or tag of that skill, and `want` to
+the blob sha of `pr-wait.sh` at that ref. The command checks that sha before
+`chmod`. It does not run whatever is on the default branch.
 
 ```bash
-dest="$(mktemp)" && (set -o pipefail; gh api repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh --jq .content | base64 -d > "$dest") && chmod +x "$dest"
+ref="<commit-or-tag>"
+want="<blob sha of pr-wait.sh at that ref>"
+dest="$(mktemp)"
+meta="$(mktemp)"
+(set -o pipefail; gh api -f ref="$ref" repos/Wicked-Sick-Ltd/pr-flow/contents/skills/landing-prs/pr-wait.sh > "$meta") && test "$(jq -r .sha < "$meta")" = "$want" && jq -r .content < "$meta" | base64 -d > "$dest" && chmod +x "$dest"
 ```
 
 Run `"$dest"`. `mktemp` creates a new private file, so the helper is not written to the fixed path `/tmp/pr-wait.sh`. On a shared machine another user can replace that fixed path before it is executed. `pipefail` makes a failed `gh api` fail the command. Without it, `base64 -d` can succeed on empty input and leave an empty executable.
 
 ## Agent runtime
 
-Resolve `pr-wait.sh` beside this `SKILL.md`, or fetch it with the command
-above. Read the repository `AGENTS.md` when it names extra gates. Use only
-tools that are actually connected. Do not invent tool names.
+Resolve `pr-wait.sh` beside this `SKILL.md` and run that file. Do not download
+a replacement from the default branch over that copy. Read the repository
+`AGENTS.md` when it names extra gates. Use only tools that are actually
+connected. Do not invent tool names.

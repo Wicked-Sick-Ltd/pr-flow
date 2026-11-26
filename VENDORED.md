@@ -9,7 +9,7 @@ upstream. Point install pins and marketplace entries here.
 
 - Canonical repository: https://github.com/Wicked-Sick-Ltd/pr-flow
 - License: MIT
-- Version: 1.1.0
+- Version: 1.1.1
 
 Earlier packages lived in a catalogue directory and were republished here.
 Track this repository from now on.
