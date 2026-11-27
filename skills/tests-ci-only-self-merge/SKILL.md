@@ -61,4 +61,4 @@ wait for the owner on changes that pass every check below.
 ## When merging
 
 Follow `merge-attribution`: comment on the pull request naming the agent and
-"tests/CI-only self-merge", and add the merge to the daily merge log.
+"tests/CI-only self-merge". That comment is the log entry.

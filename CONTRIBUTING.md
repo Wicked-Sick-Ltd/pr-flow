@@ -16,7 +16,7 @@ Security reports go through [SECURITY.md](SECURITY.md).
 - Skill text and `pr-wait.sh` stay in agreement. A behavior change updates the skill, the helper, and [CHANGELOG.md](CHANGELOG.md) together.
 - Put user-visible notes under `## Unreleased` in the changelog. Leave shipped version headings as they are.
 - Keep `version` identical in `plugin.json`, `.cursor-plugin/plugin.json`, `.claude-plugin/plugin.json`, and `.codex-plugin/plugin.json`. Bump those fields when cutting a release.
-- `skills/landing-prs/pr-wait.sh` and `skills/landing-prs/pr-wait_test.sh` stay executable.
+- `skills/landing-prs/pr-wait.sh`, `skills/landing-prs/pr-wait_test.sh`, `skills/merge-attribution/merge-audit.sh` and `skills/merge-attribution/merge-audit_test.sh` stay executable.
 - Keep secrets, tokens, and customer data out of the diff and the discussion.
 
 ## Tests
@@ -25,9 +25,10 @@ The helper's regression tests use a fake `gh` and `git`. They need Bash, `jq`, a
 
 ```bash
 bash skills/landing-prs/pr-wait_test.sh
+bash skills/merge-attribution/merge-audit_test.sh
 ```
 
-Run that before asking for review when you touch `pr-wait.sh` or the test. The same command is what GitHub Actions runs.
+Run the first before asking for review when you touch `pr-wait.sh` or its test, and the second when you touch `merge-audit.sh` or its test. The second needs only Bash and `jq`. GitHub Actions runs both.
 
 `--dry-run` prints the helper's settings and does not call GitHub:
 

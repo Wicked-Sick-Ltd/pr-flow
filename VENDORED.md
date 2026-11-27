@@ -9,9 +9,9 @@ upstream. Point install pins and marketplace entries here.
 
 - Canonical repository: https://github.com/Wicked-Sick-Ltd/pr-flow
 - License: MIT
-- Version: 1.1.3
+- Version: 1.1.4
 
 Earlier packages lived in a catalogue directory and were republished here.
 Track this repository from now on.
 
-`skills/landing-prs/pr-wait.sh` stays executable (`100755`).
+`skills/landing-prs/pr-wait.sh` and `skills/merge-attribution/merge-audit.sh` stay executable (`100755`).

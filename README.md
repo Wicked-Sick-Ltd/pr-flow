@@ -2,7 +2,7 @@
 
 Open a GitHub pull request, wait until CI and reviewer bots finish, answer every finding, and merge only when the user has authorized it and the digest is clean.
 
-**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Merge bookkeeping lives in [merge-attribution](skills/merge-attribution/SKILL.md) (who merged what, under which rule) and [tests-ci-only-self-merge](skills/tests-ci-only-self-merge/SKILL.md) (a narrow standing permission, only where the owner recorded it). Current release: **1.1.3**.
+**PR Flow** is the MIT-licensed agent plugin for that lifecycle, maintained by Wicked Sick Ltd. The rules live in [landing-prs](skills/landing-prs/SKILL.md). The command form is [pr](skills/pr/SKILL.md) (`create`, `watch`, `merge`, `land`, `status`, `sweep`). The wait step is [pr-wait.sh](skills/landing-prs/pr-wait.sh). Merge bookkeeping lives in [merge-attribution](skills/merge-attribution/SKILL.md) (who merged what, under which rule) and [tests-ci-only-self-merge](skills/tests-ci-only-self-merge/SKILL.md) (a narrow standing permission, only where the owner recorded it). Current release: **1.1.4**.
 
 This repository is the source of truth. Marketplace copies, including `Wicked-Sick-Ltd/ai-marketplace`, vendor from here. See [VENDORED.md](VENDORED.md).
 
@@ -51,13 +51,23 @@ Exit 0 means every listed check on that commit passed. Pass the SUMMARY `head=` 
 bash skills/landing-prs/pr-wait.sh --dry-run
 ```
 
+## Who merged what
+
+Every merge an agent makes leaves one comment on the pull request ([merge-attribution](skills/merge-attribution/SKILL.md)). GitHub is the merge log, so nothing else is written down. To list a day's merges across one or more GitHub users or organisations, with the merges that have no attribution comment first:
+
+```bash
+bash skills/merge-attribution/merge-audit.sh --owner OWNER --date 2026-11-27
+```
+
+Exit 0 means every merge that day carries an attribution comment. Exit 1 means at least one does not, or has too many comments to check. Exit 3 means the list could not be completed. A comment counts only when it was posted at or after the merge by the account that merged, or by an owner, member or collaborator of the repository. `--dry-run` prints the search with no GitHub call.
+
 ## Requirements
 
 - [GitHub CLI](https://cli.github.com/) (`gh`), authenticated for the repositories you land
 - Bash
 - [`jq`](https://jqlang.org/)
 
-On Windows, use Git Bash or WSL with those tools on `PATH`. Resolve `pr-wait.sh` from the installed skill folder (`skills/landing-prs/` beside this plugin).
+On Windows, use Git Bash or WSL with those tools on `PATH`. Resolve `pr-wait.sh` and `merge-audit.sh` from the installed skill folders (`skills/landing-prs/` and `skills/merge-attribution/` beside this plugin).
 
 ## Fetch pr-wait.sh
 
