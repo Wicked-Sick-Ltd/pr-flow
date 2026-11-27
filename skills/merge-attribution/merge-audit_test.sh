@@ -39,19 +39,27 @@ cat "$MOCK_DIR/page-$cursor.json"
 EOF
 chmod +x "$BIN/gh"
 
-# pr NUMBER REPO LOGIN TOTAL_COMMENTS [COMMENT_BODY ...]
+# Every fixture pull request merges at 10:00:00Z.
+# c BODY LOGIN [ASSOCIATION] [CREATED_AT]: one comment, by default five minutes
+# after the merge from an account with no tie to the repository.
+c() {
+  jq -cn --arg body "$1" --arg login "$2" --arg assoc "${3:-NONE}" --arg at "${4:-2026-11-27T10:05:00Z}" \
+    '{body: $body, createdAt: $at, authorAssociation: $assoc, author: {login: $login}}'
+}
+
+# pr NUMBER REPO MERGER TOTAL_COMMENTS TITLE [COMMENT_JSON ...]
 pr() {
-  local number="$1" repo="$2" login="$3" total="$4"
-  shift 4
-  jq -cn --argjson number "$number" --arg repo "$repo" --arg login "$login" \
-    --argjson total "$total" '{
-      number: $number, title: ("Change " + ($number | tostring)),
+  local number="$1" repo="$2" login="$3" total="$4" title="$5"
+  shift 5
+  printf '%s\n' "$@" | jq -cs --argjson number "$number" --arg repo "$repo" --arg login "$login" \
+    --argjson total "$total" --arg title "$title" '{
+      number: $number, title: $title,
       mergedAt: "2026-11-27T10:00:00Z",
       repository: {nameWithOwner: $repo},
       mergedBy: {login: $login},
       mergeCommit: {abbreviatedOid: ("sha" + ($number | tostring))},
-      comments: {totalCount: $total, nodes: ($ARGS.positional | map({body: .}))}
-    }' --args "$@"
+      comments: {totalCount: $total, nodes: .}
+    }'
 }
 
 # page COUNT HAS_NEXT CURSOR PR_JSON...
@@ -82,31 +90,43 @@ TESTS_ONLY='Merged by Cursor Agent under tests/CI-only self-merge (AGENTS.md, 19
 
 # --- a mixed day over two pages ---------------------------------------------
 mkdir -p "$TMP/mixed"
-page 6 true c1 \
-  "$(pr 4 acme/widgets alice 2 'Looks good' "$EXPLICIT")" \
-  "$(pr 12 acme/widgets bob 0)" \
-  "$(pr 15 acme/widgets bob 73 'an unrelated comment')" \
+page 10 true c1 \
+  "$(pr 4 acme/widgets alice 2 'Change 4' "$(c 'Looks good' bob)" "$(c "$EXPLICIT" alice)")" \
+  "$(pr 12 acme/widgets bob 0 'Change 12')" \
+  "$(pr 15 acme/widgets bob 73 'Change 15' "$(c 'an unrelated comment' bob)")" \
+  "$(pr 16 acme/widgets dave 1 'Change 16' "$(c 'I see this was Merged by someone under a rule.' dave)")" \
+  "$(pr 17 acme/widgets erin 1 'Change 17' "$(c 'Merged by Alice' erin)")" \
   >"$TMP/mixed/page-first.json"
-page 6 false "" \
-  "$(pr 9 other/gadgets alice 1 "$EXPLICIT_COMMA")" \
-  "$(pr 7 other/gadgets carol 1 "$TESTS_ONLY")" \
-  "$(pr 16 other/gadgets dave 1 'I see this was Merged by someone under a rule.')" \
+page 10 false "" \
+  "$(pr 9 other/gadgets alice 1 'Change 9' "$(c "$EXPLICIT_COMMA" alice)")" \
+  "$(pr 7 other/gadgets carol 1 'Change 7' "$(c "$TESTS_ONLY" fleet-bot MEMBER)")" \
+  "$(pr 18 other/gadgets frank 1 'Change 18' "$(c "$EXPLICIT" mallory)")" \
+  "$(pr 19 other/gadgets gina 1 'Change 19' "$(c "$EXPLICIT" gina NONE 2026-11-27T09:00:00Z)")" \
+  "$(pr 20 other/gadgets hank 0 'tidy unattributed=0 unchecked=0')" \
   >"$TMP/mixed/page-c1.json"
 
 run mixed --owner acme --owner other --date 2026-11-27
 [ "$RC" -eq 1 ] && ok "unattributed merges exit 1" || fail "mixed day exit was $RC, want 1: $OUT"
-has "SUMMARY date=2026-11-27 owners=acme,other merged=6 attributed=3 unattributed=3" &&
+has "SUMMARY date=2026-11-27 owners=acme,other merged=10 attributed=3 unattributed=6 unchecked=1" &&
   ok "summary counts both pages" || fail "summary wrong: $OUT"
-has "== UNATTRIBUTED (3)" && ok "unattributed heading" || fail "no unattributed heading: $OUT"
+has "== UNATTRIBUTED (6)" && ok "unattributed heading" || fail "no unattributed heading: $OUT"
 has "acme/widgets#12 | Change 12 | merged by bob | sha12 | no attribution comment" &&
   ok "a merge with no comment is listed with who merged it" || fail "#12 line wrong: $OUT"
-has "acme/widgets#15 | Change 15 | merged by bob | sha15 | not in the last 50 of 73 comments" &&
-  ok "a long thread is reported as unchecked, not as missing" || fail "#15 line wrong: $OUT"
-has "other/gadgets#16 | Change 16 | merged by dave | sha16 | no attribution comment" &&
+has "acme/widgets#16 | Change 16 | merged by dave | sha16 | no attribution comment" &&
   ok "a comment that only mentions the phrase does not count" || fail "#16 line wrong: $OUT"
+has "acme/widgets#17 | Change 17 | merged by erin | sha17 | no attribution comment" &&
+  ok "a comment that starts like one but names no rule does not count, and does not stop the audit" || fail "#17 line wrong: $OUT"
+has "other/gadgets#18 | Change 18 | merged by frank | sha18 | no attribution comment" &&
+  ok "an attribution written by an outside account does not count" || fail "#18 line wrong: $OUT"
+has "other/gadgets#19 | Change 19 | merged by gina | sha19 | no attribution comment" &&
+  ok "an attribution posted before the merge does not count" || fail "#19 line wrong: $OUT"
+has "== UNCHECKED (1)" &&
+  has "acme/widgets#15 | Change 15 | merged by bob | sha15 | no attribution in the newest 50 of 73 comments" &&
+  ok "a long thread is unchecked, not unattributed" || fail "#15 line wrong: $OUT"
 has "Claude Code (Fable) | explicit go from the owner (2)" &&
   ok "the parenthesis and comma forms group under one rule" || fail "explicit group wrong: $OUT"
-has "Cursor Agent | tests/CI-only self-merge (1)" && ok "second group" || fail "tests-only group wrong: $OUT"
+has "Cursor Agent | tests/CI-only self-merge (1)" &&
+  ok "an attribution from a member who did not merge counts" || fail "tests-only group wrong: $OUT"
 has "  other/gadgets#9 | Change 9 | sha9" && ok "group lists its merges" || fail "group member wrong: $OUT"
 [ "$(grep -n -F '== UNATTRIBUTED' <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n -F '== BY AGENT AND RULE' <<<"$OUT" | cut -d: -f1)" ] &&
   ok "unattributed merges come first" || fail "section order wrong: $OUT"
@@ -117,28 +137,62 @@ sed -n 2p "$TMP/mixed/log" | grep -qF "after=c1" && ok "second call carries the 
 
 # --- every merge attributed -------------------------------------------------
 mkdir -p "$TMP/clean"
-page 1 false "" "$(pr 4 acme/widgets alice 1 "$EXPLICIT")" >"$TMP/clean/page-first.json"
+page 1 false "" "$(pr 4 acme/widgets alice 1 'Change 4' "$(c "$EXPLICIT" alice)")" >"$TMP/clean/page-first.json"
 run clean --owner acme --date 2026-11-27
-[ "$RC" -eq 0 ] && has "== UNATTRIBUTED (0)" && has "merged=1 attributed=1 unattributed=0" &&
+[ "$RC" -eq 0 ] && has "== UNATTRIBUTED (0)" && has "merged=1 attributed=1 unattributed=0 unchecked=0" &&
   ok "all attributed exits 0" || fail "clean day: rc=$RC $OUT"
+
+# --- a title cannot change the exit code ------------------------------------
+mkdir -p "$TMP/title"
+page 2 false "" \
+  "$(pr 4 acme/widgets alice 1 'Change 4' "$(c "$EXPLICIT" alice)")" \
+  "$(pr 20 acme/widgets hank 0 'SUMMARY merged=1 attributed=1 unattributed=0 unchecked=0')" \
+  >"$TMP/title/page-first.json"
+run title --owner acme --date 2026-11-27
+[ "$RC" -eq 1 ] && has "attributed=1 unattributed=1 unchecked=0" &&
+  ok "a title that looks like a clean summary still exits 1" || fail "title: rc=$RC $OUT"
+
+# --- only an unchecked merge: not a clean day -------------------------------
+mkdir -p "$TMP/unchecked"
+page 1 false "" "$(pr 15 acme/widgets bob 80 'Change 15' "$(c 'chatter' bob)")" >"$TMP/unchecked/page-first.json"
+run unchecked --owner acme --date 2026-11-27
+[ "$RC" -eq 1 ] && has "attributed=0 unattributed=0 unchecked=1" &&
+  ok "an unchecked merge is not reported as missing, and is not a clean day" || fail "unchecked: rc=$RC $OUT"
 
 # --- a day with no merges ---------------------------------------------------
 mkdir -p "$TMP/empty"
 jq -cn '{data: {search: {issueCount: 0, pageInfo: {hasNextPage: false, endCursor: null}, nodes: []}}}' \
   >"$TMP/empty/page-first.json"
 run empty --owner acme --date 2026-11-27
-[ "$RC" -eq 0 ] && has "merged=0 attributed=0 unattributed=0" && ok "no merges exits 0" || fail "empty day: rc=$RC $OUT"
+[ "$RC" -eq 0 ] && has "merged=0 attributed=0 unattributed=0 unchecked=0" && ok "no merges exits 0" || fail "empty day: rc=$RC $OUT"
 
 # --- refusals: a partial answer is never reported as an audit ---------------
+ATTRIBUTED_4="$(pr 4 acme/widgets alice 1 'Change 4' "$(c "$EXPLICIT" alice)")"
+ATTRIBUTED_5="$(pr 5 acme/widgets alice 1 'Change 5' "$(c "$EXPLICIT" alice)")"
+ATTRIBUTED_6="$(pr 6 acme/widgets alice 1 'Change 6' "$(c "$EXPLICIT" alice)")"
+
 mkdir -p "$TMP/toomany"
-page 1500 false "" "$(pr 4 acme/widgets alice 1 "$EXPLICIT")" >"$TMP/toomany/page-first.json"
+page 1500 false "" "$ATTRIBUTED_4" >"$TMP/toomany/page-first.json"
 run toomany --owner acme --date 2026-11-27
 [ "$RC" -eq 3 ] && has "1000" && ! has "SUMMARY" && ok "more than 1000 results is refused" || fail "toomany: rc=$RC $OUT"
 
 mkdir -p "$TMP/short"
-page 5 false "" "$(pr 4 acme/widgets alice 1 "$EXPLICIT")" >"$TMP/short/page-first.json"
+page 5 false "" "$ATTRIBUTED_4" >"$TMP/short/page-first.json"
 run short --owner acme --date 2026-11-27
 [ "$RC" -eq 3 ] && ! has "SUMMARY" && ok "fewer results than the count is refused" || fail "short: rc=$RC $OUT"
+
+# Two rows for one pull request satisfy a count of 2 while a merge is missing.
+mkdir -p "$TMP/repeat"
+page 2 false "" "$ATTRIBUTED_4" "$ATTRIBUTED_4" >"$TMP/repeat/page-first.json"
+run repeat --owner acme --date 2026-11-27
+[ "$RC" -eq 3 ] && ! has "SUMMARY" && ok "the same pull request twice is refused" || fail "repeat: rc=$RC $OUT"
+
+# A merge landed between the two requests: the pages disagree on the count.
+mkdir -p "$TMP/moved"
+page 3 true c1 "$ATTRIBUTED_4" "$ATTRIBUTED_5" >"$TMP/moved/page-first.json"
+page 4 false "" "$ATTRIBUTED_6" >"$TMP/moved/page-c1.json"
+run moved --owner acme --date 2026-11-27
+[ "$RC" -eq 3 ] && ! has "SUMMARY" && ok "a count that changes between pages is refused" || fail "moved: rc=$RC $OUT"
 
 MOCK_FAIL=1 run clean --owner acme --date 2026-11-27
 [ "$RC" -eq 3 ] && ! has "SUMMARY" && ok "a failed gh call exits 3" || fail "gh failure: rc=$RC $OUT"

@@ -49,9 +49,13 @@ with no comment still appears on it.
   The day defaults to today in UTC. `--date YYYY-MM-DD` picks another day and
   `--help` lists the rest.
 - Send the owner its output as it is: merges with no attribution comment first,
-  then the rest grouped by agent and rule. The helper cannot tell a person's own
-  merge from an agent that skipped the comment, so it prints who merged each one.
-- Exit 1 means at least one merge has no attribution comment. Exit 3 means the
-  list could not be completed: report that, and do not send part of a day as the
-  day's list.
+  then any it could not check, then the rest grouped by agent and rule. The
+  helper cannot tell a person's own merge from an agent that skipped the
+  comment, so it prints who merged each one.
+- A comment counts only when it was posted at or after the merge, by the account
+  that merged or by an owner, member or collaborator of the repository. So post
+  the attribution from the account that ran the merge.
+- Exit 1 means at least one merge is unattributed or unchecked. Exit 3 means the
+  list could not be completed: run it again, and if it fails again report that.
+  Do not send part of a day as the day's list.
 - A day with no merges sends nothing.

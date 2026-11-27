@@ -13,20 +13,28 @@
 #   YYYY-MM-DD..YYYY-MM-DD; the default is today in UTC.
 #   --dry-run prints the search and does not call GitHub.
 #
-# Output: the merges with no attribution comment first, each with who merged
-# it (a person's own merge needs no comment, and only the reader can tell the
-# two apart). Then the attributed merges grouped by agent and rule. Then one
-# SUMMARY line.
+# Output, in this order:
+#   == UNATTRIBUTED       merges with no attribution comment, each with who
+#                         merged it (a person's own merge needs no comment, and
+#                         only the reader can tell the two apart)
+#   == UNCHECKED          merges with more than 50 comments and no attribution
+#                         among the newest 50: one may exist further back
+#   == BY AGENT AND RULE  the attributed merges, grouped
+#   SUMMARY ...           one line of counts, always last
 #
 # An attribution comment starts "Merged by <agent> under <rule>". The rule name
-# ends at the first " (", "," or full stop. Only the last 50 comments of each
-# pull request are read; a longer thread with no match is reported as
-# unchecked, not as missing.
+# ends at the first " (", "," or full stop. It counts only when it was posted
+# at or after the merge, by the account that merged the pull request or by an
+# owner, member or collaborator of the repository. Anyone else can comment on
+# a public pull request, and their comment must not be able to attribute a
+# merge or hide that one is missing.
 #
 # Exit codes: 0 every merge is attributed (or nothing merged), 1 at least one
-# merge has no attribution comment, 3 usage error or GitHub failure. GitHub
+# merge is unattributed or unchecked, 3 usage error or GitHub failure. GitHub
 # search returns at most 1000 results: past that the script stops with exit 3,
-# because part of a day is not an audit.
+# because part of a day is not an audit. It also stops with exit 3 when the
+# pages disagree on how many merges match or return the same pull request
+# twice, which is what a merge landing mid-read looks like. Run it again.
 #
 # Requires bash, an authenticated gh, and jq.
 # HELP-END
@@ -95,7 +103,10 @@ QUERY='query($q: String!, $after: String) {
       repository { nameWithOwner }
       mergedBy { login }
       mergeCommit { abbreviatedOid }
-      comments(last: '"$DEPTH"') { totalCount nodes { body } }
+      comments(last: '"$DEPTH"') {
+        totalCount
+        nodes { body createdAt authorAssociation author { login } }
+      }
     } }
   }
 }'
@@ -119,37 +130,53 @@ while :; do
   [ -n "$after" ] || die "GitHub reported another page without a cursor"
 done
 
-got="$(jq -s '[.[].data.search.nodes[] | select(.number)] | length' "$pages")" || die "could not read the response"
-want="$(jq -s '.[0].data.search.issueCount' "$pages")" || die "could not read the response"
-[ "$got" -ge "$want" ] || die "GitHub returned $got of $want merges; a partial list is not an audit"
+# The pages are only an audit if they agree on the count and hold exactly that
+# many distinct pull requests. A merge landing between two requests shifts the
+# results: the count changes, or one row repeats while another goes missing.
+shape="$(jq -rs '
+  [.[].data.search.issueCount] as $counts
+  | [.[].data.search.nodes[] | select(.number) | "\(.repository.nameWithOwner)#\(.number)"] as $refs
+  | "\($counts | unique | length) \($counts[0]) \($refs | length) \($refs | unique | length)"
+' "$pages")" || die "could not read the response"
+read -r count_values want rows distinct <<<"$shape"
+[ "$count_values" -eq 1 ] || die "the number of merges changed while GitHub was being read; run it again"
+[ "$rows" -eq "$distinct" ] || die "GitHub returned the same pull request twice; run it again"
+[ "$distinct" -eq "$want" ] || die "GitHub returned $distinct of $want merges; a partial list is not an audit"
 
 report="$(jq -rs --arg date "$date_arg" --arg owners "$(IFS=,; echo "${owners[*]}")" --argjson depth "$DEPTH" '
+  def tied: . == "OWNER" or . == "MEMBER" or . == "COLLABORATOR";
   def attribution:
-    [ .comments.nodes[].body
-      | select(startswith("Merged by "))
-      | capture("^Merged by (?<agent>.+?) under (?<rule>.+?)(?= \\(|,|\\.( |$)|\\n|$)")
-    ] | first // null;
+    . as $pr
+    | [ .comments.nodes[]
+        | select((.body // "") | startswith("Merged by "))
+        | select(.createdAt >= $pr.mergedAt)
+        | select(((.author.login // "") == ($pr.mergedBy.login // "-")) or (.authorAssociation | tied))
+        | .body
+        | capture("^Merged by (?<agent>.+?) under (?<rule>.+?)(?= \\(|,|\\.( |$)|\\n|$)")?
+      ] | first // null;
   def ref: "\(.repository.nameWithOwner)#\(.number)";
   def sha: .mergeCommit.abbreviatedOid // "-";
+  def who: "\(ref) | \(.title) | merged by \(.mergedBy.login // "unknown") | \(sha) | ";
 
   [ .[].data.search.nodes[] | select(.number) | . + {attr: attribution} ]
-  | map(select(.attr == null)) as $missing
   | map(select(.attr != null)) as $have
+  | map(select(.attr == null and .comments.totalCount <= $depth)) as $missing
+  | map(select(.attr == null and .comments.totalCount > $depth)) as $unchecked
   | "== UNATTRIBUTED (\($missing | length))",
-    ( $missing[]
-      | "\(ref) | \(.title) | merged by \(.mergedBy.login // "unknown") | \(sha) | "
-        + ( if .comments.totalCount > $depth
-            then "not in the last \($depth) of \(.comments.totalCount) comments"
-            else "no attribution comment" end ) ),
+    ( $missing[] | who + "no attribution comment" ),
+    "== UNCHECKED (\($unchecked | length))",
+    ( $unchecked[] | who + "no attribution in the newest \($depth) of \(.comments.totalCount) comments" ),
     "== BY AGENT AND RULE",
     ( $have | group_by([.attr.agent, .attr.rule])[]
       | "\(.[0].attr.agent) | \(.[0].attr.rule) (\(length))",
         ( .[] | "  \(ref) | \(.title) | \(sha)" ) ),
-    "SUMMARY date=\($date) owners=\($owners) merged=\(length) attributed=\($have | length) unattributed=\($missing | length)"
+    "SUMMARY date=\($date) owners=\($owners) merged=\(length) attributed=\($have | length) unattributed=\($missing | length) unchecked=\($unchecked | length)"
 ' "$pages")" || die "could not read the response"
 
 printf '%s\n' "$report"
-case "$report" in
-  *" unattributed=0") exit 0 ;;
+# Only the SUMMARY line decides the exit code. It is the last line and holds no
+# text from GitHub, so a pull request title cannot change the result.
+case "${report##*$'\n'}" in
+  "SUMMARY "*" unattributed=0 unchecked=0") exit 0 ;;
   *) exit 1 ;;
 esac

@@ -59,7 +59,7 @@ Every merge an agent makes leaves one comment on the pull request ([merge-attrib
 bash skills/merge-attribution/merge-audit.sh --owner OWNER --date 2026-11-27
 ```
 
-Exit 0 means every merge that day carries an attribution comment. Exit 1 means at least one does not. Exit 3 means the list could not be completed. `--dry-run` prints the search with no GitHub call.
+Exit 0 means every merge that day carries an attribution comment. Exit 1 means at least one does not, or has too many comments to check. Exit 3 means the list could not be completed. A comment counts only when it was posted at or after the merge by the account that merged, or by an owner, member or collaborator of the repository. `--dry-run` prints the search with no GitHub call.
 
 ## Requirements
 
